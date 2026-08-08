@@ -144,6 +144,37 @@ OUT_DIR="$REPO_ROOT/dist"
 TARBALL="$OUT_DIR/pypto-toolchain-${VERSION}-${ARCH}.tar.gz"
 IMAGE="pypto-toolchain:${VERSION}-${ARCH}"
 
+# The base image is the only thing dockerd itself has to fetch, and it needs to
+# happen exactly once per build machine — a restart does not lose it, and no
+# other machine in the fleet needs it at all (they only install the resulting
+# tarball). So pre-pulling it behind a temporary proxy is preferable to giving
+# the daemon a permanent proxy it would keep failing against once that proxy
+# goes away.
+if ! "${DOCKER[@]}" image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+    cat <<EOF
+note: $BASE_IMAGE is not present locally, so dockerd has to fetch it.
+      --proxy above does NOT apply: it covers downloads inside the container,
+      while the image pull is done by the daemon, which reads its own proxy
+      from a systemd drop-in.
+
+      If the pull is slow, stop, pull it once behind a temporary drop-in, and
+      remove the drop-in again — the image then stays cached for every later
+      build:
+
+        sudo mkdir -p /etc/systemd/system/docker.service.d
+        printf '[Service]\\nEnvironment="HTTPS_PROXY=%s"\\n' "\${PROXY:-socks5://127.0.0.1:1080}" \\
+          | sudo tee /etc/systemd/system/docker.service.d/zz-temp-proxy.conf
+        sudo systemctl daemon-reload && sudo systemctl restart docker
+        docker pull $BASE_IMAGE
+        sudo rm /etc/systemd/system/docker.service.d/zz-temp-proxy.conf
+        sudo systemctl daemon-reload && sudo systemctl restart docker
+
+      Or point at a registry mirror, which needs no proxy at all:
+        PYPTO_BASE_IMAGE=<mirror>/almalinux:8 $0 $VERSION ...
+
+EOF
+fi
+
 echo "==> building $IMAGE"
 echo "    prefix  $PREFIX"
 echo "    base    $BASE_IMAGE"
