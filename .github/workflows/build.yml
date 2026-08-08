@@ -1,0 +1,178 @@
+name: Build bundle
+
+# Bundles are built here, not on a developer machine. The fleet's own hosts sit
+# behind a restricted network — Docker Hub resolves to a poisoned address, and
+# gcc.gnu.org and github.com need a proxy that only exists while someone's
+# terminal is open — whereas GitHub-hosted runners reach all of them directly.
+# Building here also means every bundle has a log, a reproducible input set, and
+# no dependency on which laptop happened to run it.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Bundle version, e.g. 2026.08.1'
+        required: true
+        type: string
+      publish:
+        description: 'Create a GitHub release and commit the manifest'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          # Free for public repositories. Native, not QEMU: a full GCC bootstrap
+          # under emulation runs for the better part of a day.
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # A GCC three-stage bootstrap plus a PGO Python build on a 4-core runner
+    # takes roughly two hours; the ceiling is GitHub's own 6h job limit.
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        # The GCC build tree alone runs to several GB and the runner image ships
+        # with toolchains this build never uses. Reclaim them before starting
+        # rather than failing an hour in with ENOSPC.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Build
+        # No --mirror or --proxy: those exist for the restricted network on the
+        # fleet's own machines. A GitHub runner reaches upstream directly, and
+        # upstream is the more trustworthy source for a pinned artifact anyway.
+        run: ./scripts/build.sh "${{ inputs.version }}"
+
+      - name: Summarise
+        run: |
+          {
+            echo "### ${{ matrix.arch }}"
+            echo '```'
+            cat "dist/MANIFEST-${{ inputs.version }}-${{ matrix.arch }}"
+            echo '```'
+            ls -lh dist/*.tar.gz
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.arch }}
+          path: |
+            dist/pypto-toolchain-${{ inputs.version }}-${{ matrix.arch }}.tar.gz
+            dist/pypto-toolchain-${{ inputs.version }}-${{ matrix.arch }}.tar.gz.sha256
+            dist/MANIFEST-${{ inputs.version }}-${{ matrix.arch }}
+            manifest/${{ inputs.version }}.env
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge manifests and check the two architectures agree
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          a="artifacts/bundle-aarch64/manifest/$VERSION.env"
+          x="artifacts/bundle-x86_64/manifest/$VERSION.env"
+
+          # Both bundles must be the same toolchain, differing only in the
+          # architecture they were compiled for. If the two runners resolved
+          # different component versions, "one bundle version = one environment"
+          # is already false and no amount of downstream checking recovers it.
+          status=0
+          for key in TOOLCHAIN_VERSION GLIBC_FLOOR GCC_VERSION PYTHON_VERSION CCACHE_VERSION UV_VERSION; do
+            av="$(grep -E "^$key=" "$a" | cut -d= -f2-)"
+            xv="$(grep -E "^$key=" "$x" | cut -d= -f2-)"
+            if [ "$av" != "$xv" ]; then
+              echo "::error::$key differs between architectures: aarch64=$av x86_64=$xv"
+              status=1
+            else
+              printf '  %-18s %s\n' "$key" "$av"
+            fi
+          done
+          [ "$status" -eq 0 ] || exit 1
+
+          # Shared keys from either file, plus one sha per architecture.
+          mkdir -p manifest
+          grep -vE '^BUNDLE_SHA256_' "$a" > "manifest/$VERSION.env"
+          grep -hE '^BUNDLE_SHA256_' "$a" "$x" | sort >> "manifest/$VERSION.env"
+          echo "--- manifest/$VERSION.env"
+          cat "manifest/$VERSION.env"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" \
+            --title "pypto-toolchain $VERSION" \
+            --notes-file - <<EOF
+          Host toolchain bundle: CPython, GCC + libstdc++, uv and ccache, built
+          against glibc $(grep -E '^GLIBC_FLOOR=' "manifest/$VERSION.env" | cut -d= -f2) so it runs on any host at or above that floor.
+
+          \`\`\`
+          $(cat "manifest/$VERSION.env")
+          \`\`\`
+
+          Install:
+          \`\`\`
+          sudo pypto-toolchain install $VERSION
+          sudo pypto-toolchain use $VERSION
+          pypto-toolchain verify
+          \`\`\`
+          EOF
+          gh release upload "$VERSION" \
+            artifacts/bundle-*/pypto-toolchain-*.tar.gz \
+            artifacts/bundle-*/pypto-toolchain-*.tar.gz.sha256 \
+            "manifest/$VERSION.env"
+
+      - name: Commit the manifest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # install.sh deploys this checkout to each host, and the CLI reads the
+          # sha256 out of it before downloading anything — so the manifest has to
+          # be in the repository, not only attached to the release.
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add "manifest/$VERSION.env"
+          if git diff --cached --quiet; then
+            echo "manifest already committed and unchanged"
+            exit 0
+          fi
+          git commit -m "chore: manifest for $VERSION"
+          if ! git push; then
+            echo "::warning::Could not push the manifest (branch protection?). It is"
+            echo "attached to the release — commit manifest/$VERSION.env by hand,"
+            echo "or hosts will not be able to resolve this version."
+          fi

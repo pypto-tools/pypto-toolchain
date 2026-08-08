@@ -73,7 +73,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # for exactly this, so the build stays self-contained and base-image-agnostic.
 RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
         gcc gcc-c++ make cmake git \
-        zlib-devel bzip2-devel xz-devel libffi-devel openssl-devel \
+        zlib-devel bzip2-devel xz-devel libffi-devel openssl-devel libzstd-devel \
         sqlite-devel readline-devel ncurses-devel libuuid-devel gdbm-devel \
         bison flex patch diffutils file findutils which \
         tar xz bzip2 curl ca-certificates \
@@ -165,12 +165,18 @@ RUN curl -fsSL --retry 5 \
 # PyPTO CI scopes the compile cache to the pinned pto-isa commit (pypto #1139),
 # and older ccache ignores the variable *silently*, serving objects built
 # against the previous ISA headers. One fleet machine currently runs 3.7.12.
+#
+# zstd comes from libzstd-devel rather than ccache's own download, and the redis
+# backend is off so hiredis is never needed: ccache 4.8 replaced the old
+# -DZSTD_FROM_INTERNET / -DHIREDIS_FROM_INTERNET switches, and CMake only warns
+# about unknown -D options — the build would have silently fallen through to
+# whatever the default resolution does.
 RUN curl -fsSL --retry 5 \
       "https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}.tar.xz" | tar xJ \
     && cmake -S ccache-${CCACHE_VERSION} -B ccache-build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
-        -DZSTD_FROM_INTERNET=ON -DHIREDIS_FROM_INTERNET=ON \
+        -DREDIS_STORAGE_BACKEND=OFF \
         -DENABLE_TESTING=OFF \
     && cmake --build ccache-build -j"$(nproc)" \
     && cmake --install ccache-build --strip \
