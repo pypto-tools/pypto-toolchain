@@ -12,7 +12,7 @@
 #
 #   scripts/build.sh 2026.08.1                  # build for the host arch
 #   scripts/build.sh 2026.08.1 --mirror cn      # domestic mirrors for GCC/Python
-#   scripts/build.sh 2026.08.1 --mirror cn --proxy socks5://127.0.0.1:17888
+#   scripts/build.sh 2026.08.1 --mirror cn --proxy socks5://127.0.0.1:1080
 #                                               # ...and a proxy for the rest
 #
 # Note that --proxy only affects downloads made INSIDE the container. Pulling
