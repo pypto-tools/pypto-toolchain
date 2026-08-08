@@ -22,10 +22,35 @@ set -euo pipefail
 : "${PREFIX:?PREFIX must be set}"
 
 # Recorded so a host can tell, without unpacking anything else, whether this
-# bundle can run at all. The floor comes from the build image's glibc: nothing
-# here references a newer symbol, and glibc is backward compatible.
-glibc_floor() {
-    ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$'
+# bundle can run at all. glibc is backward compatible, so a host at or above
+# this version can run everything here.
+build_glibc() {
+    # sed rather than `head -1` / `grep -m1`: those exit after the first line,
+    # ldd then takes SIGPIPE, and under `set -o pipefail` the assignment that
+    # captures this would abort the whole script with 141. sed without `q`
+    # consumes all of the input, so nothing is signalled.
+    ldd --version | sed -n '1s/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p'
+}
+
+# The floor DERIVED FROM THE ARTIFACTS: the highest GLIBC_x.y any bundled binary
+# actually asks the loader for. This is the real requirement, whereas the build
+# image's own glibc is merely what we believe we linked against.
+#
+# It matters because the build container runs on a host whose glibc is usually
+# much newer (a GitHub arm64 runner is Ubuntu 24.04 / glibc 2.39 while the
+# container is AlmaLinux 8 / glibc 2.28). If anything ever leaked in from the
+# host, the symbols would prove it and the guard below fails the build rather
+# than shipping a bundle that dies on the fleet's own machines.
+referenced_glibc_max() {
+    # `|| true`: the prefix legitimately contains non-ELF files (wrapper
+    # scripts, libtool .la files) that objdump rejects, which xargs reports as
+    # 123, and grep exits 1 when a file happens to reference nothing. The scan
+    # is best-effort over a mixed directory, so under `set -e` none of that may
+    # be allowed to abort the manifest.
+    find "$PREFIX" -type f \( -perm -u+x -o -name '*.so*' \) -print0 2>/dev/null \
+        | xargs -0 -r objdump -p 2>/dev/null \
+        | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+        | sed 's/^GLIBC_//' | sort -V | tail -1 || true
 }
 
 # sha256 of the load-bearing binaries. Not every file: the point is to catch a
@@ -55,11 +80,27 @@ glibcxx_max() {
         | grep -oE '^GLIBCXX_[0-9.]+$' | sort -V | tail -1
 }
 
+BUILD_GLIBC="$(build_glibc)"
+REF_GLIBC="$(referenced_glibc_max)"
+
+# A binary cannot legitimately reference a glibc newer than the one it linked
+# against, so this only trips if something from outside the container found its
+# way into the bundle. Fail here: the symptom on a target host would be a bare
+# "version `GLIBC_2.39' not found" hours later, with nothing pointing back here.
+if [ -n "$REF_GLIBC" ] && \
+   [ "$(printf '%s\n%s\n' "$BUILD_GLIBC" "$REF_GLIBC" | sort -V | tail -1)" != "$BUILD_GLIBC" ]; then
+    echo "gen-manifest: a bundled binary requires GLIBC_$REF_GLIBC, but this" >&2
+    echo "  container's glibc is only $BUILD_GLIBC — something leaked in from" >&2
+    echo "  the build host. Refusing to produce a manifest." >&2
+    exit 1
+fi
+
 cat <<EOF
 # pypto-toolchain bundle manifest. Generated at build time; do not edit.
 BUNDLE_ARCH $(uname -m)
 BUNDLE_PREFIX $PREFIX
-GLIBC_FLOOR $(glibc_floor)
+GLIBC_FLOOR ${REF_GLIBC:-$BUILD_GLIBC}
+GLIBC_BUILD $BUILD_GLIBC
 GCC_VERSION $("$PREFIX/gcc/bin/g++-15" -dumpversion)
 GCC_TARGET $("$PREFIX/gcc/bin/g++-15" -dumpmachine)
 GLIBCXX_MAX $(glibcxx_max)
