@@ -39,6 +39,30 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Docker socket access, elevated only where it is actually needed. The script
+# itself must keep running as the invoking user: every file it produces lands in
+# the working tree (dist/, and manifest/<version>.env, which gets committed), and
+# a root-owned manifest would need a chown before git would touch it.
+if docker info >/dev/null 2>&1; then
+    DOCKER=(docker)
+elif sudo -n docker info >/dev/null 2>&1 || { [ -t 0 ] && sudo docker info >/dev/null 2>&1; }; then
+    DOCKER=(sudo docker)
+    echo "note: using 'sudo docker' (no direct socket access for $(id -un))"
+    echo "      to avoid the prompt permanently: sudo usermod -aG docker $(id -un) && newgrp docker"
+else
+    cat >&2 <<EOF
+error: cannot reach the docker daemon as $(id -un), and sudo did not help.
+
+  Add yourself to the docker group (preferred, survives reboots):
+    sudo usermod -aG docker $(id -un)
+    newgrp docker            # or log out and back in
+
+  Or check the daemon is up:
+    systemctl status docker
+EOF
+    exit 1
+fi
+
 ARCH="$(uname -m)"
 
 # The prefix is compiled into the GCC driver and into Python's sysconfig, so it
@@ -74,7 +98,7 @@ echo "    prefix  $PREFIX"
 echo "    base    $BASE_IMAGE"
 echo "    mirrors $MIRROR_SET"
 
-docker build \
+"${DOCKER[@]}" build \
     -f docker/build.Dockerfile \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "PREFIX=$PREFIX" \
@@ -88,7 +112,9 @@ echo "==> exporting $TARBALL"
 mkdir -p "$OUT_DIR"
 # Tar with the version directory as the single top-level entry, so unpacking at
 # /opt/pypto/toolchain lands it at exactly the prefix it was built for.
-docker run --rm "$IMAGE" \
+# The redirect is performed by THIS shell, not by the elevated docker, so the
+# tarball is owned by the invoking user even when DOCKER is "sudo docker".
+"${DOCKER[@]}" run --rm "$IMAGE" \
     tar czf - -C /opt/pypto/toolchain "$VERSION" > "$TARBALL"
 
 SHA256="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
@@ -96,7 +122,7 @@ SIZE="$(du -h "$TARBALL" | cut -f1)"
 echo "$SHA256  $(basename "$TARBALL")" > "$TARBALL.sha256"
 
 echo "==> extracting the in-bundle manifest"
-docker run --rm "$IMAGE" cat "$PREFIX/MANIFEST" > "$OUT_DIR/MANIFEST-${VERSION}-${ARCH}"
+"${DOCKER[@]}" run --rm "$IMAGE" cat "$PREFIX/MANIFEST" > "$OUT_DIR/MANIFEST-${VERSION}-${ARCH}"
 
 # The per-version manifest is the single source of truth consumed by install.sh.
 # Written per-arch and merged, because the two architectures are built on
