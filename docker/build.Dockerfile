@@ -76,15 +76,18 @@ RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
         zlib-devel bzip2-devel xz-devel libffi-devel openssl-devel \
         sqlite-devel readline-devel ncurses-devel libuuid-devel gdbm-devel \
         bison flex patch diffutils file findutils which \
-        tar xz bzip2 wget curl ca-certificates \
+        tar xz bzip2 curl ca-certificates \
     && dnf clean all
 
-# bzip2 and wget are the *binaries*, not development packages, and both are
-# needed by contrib/download_prerequisites: three of the five prerequisites ship
-# as .tar.bz2, and installing bzip2-devel (which this list also carries, for
-# Python) does NOT provide the bzip2 command. wget is what the script reaches
-# for first; without it the script still works via curl but logs a confusing
-# "type: wget: not found" before falling back.
+# bzip2 is the *binary*, not the development package: three of the five GCC
+# prerequisites ship as .tar.bz2, and bzip2-devel (also in this list, for
+# Python) provides headers and a library, not the bzip2 command.
+#
+# wget is deliberately ABSENT. contrib/download_prerequisites prefers it over
+# curl when present, and wget rejects a socks5:// proxy outright ("Unsupported
+# scheme"), which breaks the --proxy path this build depends on from behind a
+# restricted network. Without wget the script falls back to curl, which handles
+# socks5 fine — it only logs a cosmetic "type: wget: not found" first.
 
 # No texinfo on purpose. It only provides makeinfo, which GCC uses to render its
 # manuals; configure detects its absence and skips documentation, leaving the
