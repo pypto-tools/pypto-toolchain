@@ -91,7 +91,12 @@ WORKDIR /build
 # --- GCC ------------------------------------------------------------------
 # install-strip, not install: an unstripped GCC 15 install is ~1.8 GB, of which
 # ~1.6 GB is debug info for cc1plus/lto1 that nobody here will ever use.
-RUN curl -fsSL --retry 5 --retry-all-errors \
+#
+# Every curl here is plain `--retry`, without --retry-all-errors: the base
+# image ships curl 7.61 (EL8) and that option only arrived in 7.71, where it
+# fails the whole command as an unknown option rather than being ignored.
+# --retry alone already covers the transient timeouts and 5xx that matter.
+RUN curl -fsSL --retry 5 \
       "${GNU_MIRROR}/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" | tar xJ \
     && (cd gcc-${GCC_VERSION} && ./contrib/download_prerequisites) \
     && mkdir gcc-build && cd gcc-build \
@@ -130,7 +135,7 @@ RUN if command -v patchelf >/dev/null 2>&1; then \
 # --enable-shared plus an RPATH to its own lib: extension builds (nanobind via
 # scikit-build-core) read these paths out of sysconfig, so they must point
 # inside the bundle rather than at whatever the host has.
-RUN curl -fsSL --retry 5 --retry-all-errors \
+RUN curl -fsSL --retry 5 \
       "${PYTHON_MIRROR}/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" | tar xJ \
     && cd Python-${PYTHON_VERSION} \
     && ./configure \
@@ -150,7 +155,7 @@ RUN curl -fsSL --retry 5 --retry-all-errors \
 # PyPTO CI scopes the compile cache to the pinned pto-isa commit (pypto #1139),
 # and older ccache ignores the variable *silently*, serving objects built
 # against the previous ISA headers. One fleet machine currently runs 3.7.12.
-RUN curl -fsSL --retry 5 --retry-all-errors \
+RUN curl -fsSL --retry 5 \
       "https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}.tar.xz" | tar xJ \
     && cmake -S ccache-${CCACHE_VERSION} -B ccache-build \
         -DCMAKE_BUILD_TYPE=Release \
@@ -166,7 +171,7 @@ RUN curl -fsSL --retry 5 --retry-all-errors \
 # cache by hardlink, so a per-job venv gets torch in seconds and costs no extra
 # disk, with none of the global mutable state that layering required.
 RUN arch="$(uname -m)" \
-    && curl -fsSL --retry 5 --retry-all-errors \
+    && curl -fsSL --retry 5 \
         "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${arch}-unknown-linux-gnu.tar.gz" \
       | tar xz --strip-components=1 -C "${PREFIX}/bin" \
     && "${PREFIX}/bin/uv" --version
