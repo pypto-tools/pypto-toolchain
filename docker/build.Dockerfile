@@ -75,9 +75,16 @@ RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
         gcc gcc-c++ make cmake git \
         zlib-devel bzip2-devel xz-devel libffi-devel openssl-devel \
         sqlite-devel readline-devel ncurses-devel libuuid-devel gdbm-devel \
-        texinfo bison flex patch diffutils file findutils which \
+        bison flex patch diffutils file findutils which \
         tar xz curl ca-certificates \
     && dnf clean all
+
+# No texinfo on purpose. It only provides makeinfo, which GCC uses to render its
+# manuals; configure detects its absence and skips documentation, leaving the
+# compiler itself unaffected. On RHEL 8 rebuilds texinfo sits in PowerTools/CRB,
+# a repo whose name and default-enabled state vary between AlmaLinux, Rocky and
+# RHEL — enabling it would reintroduce exactly the base-image coupling that
+# download_prerequisites was chosen to avoid.
 
 WORKDIR /build
 
