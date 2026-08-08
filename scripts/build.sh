@@ -11,7 +11,14 @@
 # Build one bundle and export it as a tarball plus its sha256.
 #
 #   scripts/build.sh 2026.08.1                  # build for the host arch
-#   scripts/build.sh 2026.08.1 --mirror cn      # use domestic source mirrors
+#   scripts/build.sh 2026.08.1 --mirror cn      # domestic mirrors for GCC/Python
+#   scripts/build.sh 2026.08.1 --mirror cn --proxy socks5://127.0.0.1:17888
+#                                               # ...and a proxy for the rest
+#
+# Note that --proxy only affects downloads made INSIDE the container. Pulling
+# the base image is done by dockerd, which reads its proxy from a systemd
+# drop-in and cannot be influenced from here:
+#   /etc/systemd/system/docker.service.d/http-proxy.conf
 #
 # Builds NATIVELY for the host architecture. Cross-building aarch64 under qemu
 # would work but a full GCC bootstrap through emulation takes many hours, so the
@@ -32,9 +39,11 @@ fi
 shift
 
 MIRROR_SET="upstream"
+PROXY="${PYPTO_BUILD_PROXY:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --mirror) MIRROR_SET="$2"; shift 2 ;;
+        --proxy)  PROXY="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -70,14 +79,19 @@ ARCH="$(uname -m)"
 # later is a full rebuild, not a config edit.
 PREFIX="/opt/pypto/toolchain/${VERSION}"
 
+# AlmaLinux 8 for both arches: glibc 2.28 (the floor the bundle promises), ~75 MB
+# rather than manylinux's ~600 MB of prebuilt CPythons this build never touches,
+# and on Docker Hub, which has usable regional mirrors — quay.io pulls at
+# ~100 KB/s from these machines. Override to point at a mirror, e.g.
+#   PYPTO_BASE_IMAGE=<registry-mirror>/almalinux:8 scripts/build.sh ...
+BASE_IMAGE="${PYPTO_BASE_IMAGE:-almalinux:8}"
+
 case "$ARCH" in
-    aarch64) BASE_IMAGE="quay.io/pypa/manylinux_2_28_aarch64"
-             GCC_ARCH_CONFIG="--with-arch=armv8-a --with-tune=generic" ;;
-    x86_64)  BASE_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
+    aarch64) GCC_ARCH_CONFIG="--with-arch=armv8-a --with-tune=generic" ;;
              # x86-64-v2 (SSE4.2/POPCNT, Nehalem 2008+) rather than plain
              # x86-64: every machine that can host this is far newer, and the
              # baseline still excludes AVX so it stays portable.
-             GCC_ARCH_CONFIG="--with-arch=x86-64-v2 --with-tune=generic" ;;
+    x86_64)  GCC_ARCH_CONFIG="--with-arch=x86-64-v2 --with-tune=generic" ;;
     *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
@@ -88,6 +102,43 @@ case "$MIRROR_SET" in
               PYTHON_MIRROR="https://mirrors.huaweicloud.com/python" ;;
     *) echo "unknown mirror set: $MIRROR_SET (expected: upstream, cn)" >&2; exit 2 ;;
 esac
+
+# Proxy for downloads made INSIDE the build container. Separate from the proxy
+# dockerd needs to pull the base image: that one is a systemd drop-in on the
+# daemon and nothing here can influence it.
+#
+# --mirror cn covers GCC and Python, but contrib/download_prerequisites
+# (gcc.gnu.org) plus the ccache and uv release tarballs (github.com) still leave
+# the network, and those are exactly the hosts that are slow here.
+#
+# HTTP_PROXY/HTTPS_PROXY/NO_PROXY are predefined build args: docker forwards
+# them without an ARG declaration and keeps them out of the image history.
+BUILD_PROXY_ARGS=()
+BUILD_NETWORK_ARGS=()
+if [ -n "$PROXY" ]; then
+    BUILD_PROXY_ARGS=(--build-arg "HTTP_PROXY=$PROXY"
+                      --build-arg "HTTPS_PROXY=$PROXY"
+                      --build-arg "NO_PROXY=localhost,127.0.0.1,::1")
+    case "$PROXY" in
+        # A proxy on the host's loopback is unreachable from a container's own
+        # 127.0.0.1, so the build has to share the host's network namespace to
+        # use it. Anything else (a LAN address, a container name) routes fine
+        # from the default bridge and is left alone.
+        *//127.0.0.1:*|*//localhost:*|*//::1:*)
+            BUILD_NETWORK_ARGS=(--network host)
+            echo "note: proxy is on the host loopback -> building with --network host" ;;
+    esac
+    # socks5h:// is a curl-ism. Go's net/http, which is what curl-in-container
+    # will NOT use but dockerd and many tools do, only understands socks5://;
+    # curl accepts both, so normalise and avoid the footgun entirely.
+    case "$PROXY" in
+        socks5h://*) echo "note: rewriting socks5h:// to socks5:// (only curl understands socks5h)"
+                     PROXY="socks5://${PROXY#socks5h://}"
+                     BUILD_PROXY_ARGS=(--build-arg "HTTP_PROXY=$PROXY"
+                                       --build-arg "HTTPS_PROXY=$PROXY"
+                                       --build-arg "NO_PROXY=localhost,127.0.0.1,::1") ;;
+    esac
+fi
 
 OUT_DIR="$REPO_ROOT/dist"
 TARBALL="$OUT_DIR/pypto-toolchain-${VERSION}-${ARCH}.tar.gz"
@@ -100,6 +151,8 @@ echo "    mirrors $MIRROR_SET"
 
 "${DOCKER[@]}" build \
     -f docker/build.Dockerfile \
+    "${BUILD_NETWORK_ARGS[@]+"${BUILD_NETWORK_ARGS[@]}"}" \
+    "${BUILD_PROXY_ARGS[@]+"${BUILD_PROXY_ARGS[@]}"}" \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "PREFIX=$PREFIX" \
     --build-arg "GCC_ARCH_CONFIG=$GCC_ARCH_CONFIG" \

@@ -25,13 +25,19 @@
 
 # glibc floor. Built here, the binaries reference no symbol newer than the base
 # image's glibc, and glibc is backward compatible — so the bundle runs on any
-# host at or above that floor. manylinux_2_28 gives glibc 2.28 (RHEL 8 era) and
-# ships a gcc-toolset new enough to bootstrap GCC 15.
+# host at or above that floor.
 #
 # Do NOT "helpfully" move this to a newer base: the floor is the contract that
 # lets a machine added next year work without re-testing. For reference, ptoas
 # itself already requires GLIBC_2.34, so 2.28 will never be the binding limit.
-ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_aarch64
+#
+# AlmaLinux 8 rather than manylinux_2_28: both are glibc 2.28, but manylinux is
+# ~600 MB of prebuilt CPythons and auditwheel that this build never touches (it
+# compiles its own Python and GCC), and it lives on quay.io, which pulls at
+# ~100 KB/s from the network these machines sit on. AlmaLinux 8 is ~75 MB and on
+# Docker Hub, which has usable regional mirrors. Its stock GCC 8.5 already
+# implements the C++14 that bootstrapping GCC 15 requires.
+ARG BASE_IMAGE=almalinux:8
 FROM ${BASE_IMAGE}
 
 # The install prefix is BAKED INTO the GCC driver and into Python's sysconfig
@@ -61,11 +67,17 @@ ARG GCC_ARCH_CONFIG=--with-arch=armv8-a --with-tune=generic
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN yum install -y --setopt=tsflags=nodocs \
-        gmp-devel mpfr-devel libmpc-devel zlib-devel bzip2-devel xz-devel \
-        libffi-devel openssl-devel sqlite-devel readline-devel ncurses-devel \
-        texinfo bison flex \
-    && yum clean all
+# gmp/mpfr/mpc are NOT taken from the distro: on RHEL 8 derivatives libmpc-devel
+# lives in the PowerTools/CRB repo, whose name and default-enabled state differ
+# between AlmaLinux, Rocky and RHEL. GCC ships contrib/download_prerequisites
+# for exactly this, so the build stays self-contained and base-image-agnostic.
+RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
+        gcc gcc-c++ make cmake git \
+        zlib-devel bzip2-devel xz-devel libffi-devel openssl-devel \
+        sqlite-devel readline-devel ncurses-devel libuuid-devel gdbm-devel \
+        texinfo bison flex patch diffutils file findutils which \
+        tar xz curl ca-certificates \
+    && dnf clean all
 
 WORKDIR /build
 
@@ -74,6 +86,7 @@ WORKDIR /build
 # ~1.6 GB is debug info for cc1plus/lto1 that nobody here will ever use.
 RUN curl -fsSL --retry 5 --retry-all-errors \
       "${GNU_MIRROR}/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" | tar xJ \
+    && (cd gcc-${GCC_VERSION} && ./contrib/download_prerequisites) \
     && mkdir gcc-build && cd gcc-build \
     && ../gcc-${GCC_VERSION}/configure \
         --prefix="${PREFIX}/gcc" \
