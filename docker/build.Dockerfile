@@ -76,8 +76,15 @@ RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
         zlib-devel bzip2-devel xz-devel libffi-devel openssl-devel \
         sqlite-devel readline-devel ncurses-devel libuuid-devel gdbm-devel \
         bison flex patch diffutils file findutils which \
-        tar xz curl ca-certificates \
+        tar xz bzip2 wget curl ca-certificates \
     && dnf clean all
+
+# bzip2 and wget are the *binaries*, not development packages, and both are
+# needed by contrib/download_prerequisites: three of the five prerequisites ship
+# as .tar.bz2, and installing bzip2-devel (which this list also carries, for
+# Python) does NOT provide the bzip2 command. wget is what the script reaches
+# for first; without it the script still works via curl but logs a confusing
+# "type: wget: not found" before falling back.
 
 # No texinfo on purpose. It only provides makeinfo, which GCC uses to render its
 # manuals; configure detects its absence and skips documentation, leaving the
