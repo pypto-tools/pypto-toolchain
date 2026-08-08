@@ -1,0 +1,436 @@
+#!/usr/bin/env bash
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+#
+# Deploy and verify PyPTO toolchain bundles.
+#
+#   pypto-toolchain install <version>    download, check, unpack
+#   pypto-toolchain use <version>        point `current` at a version
+#   pypto-toolchain verify [--require ...]
+#   pypto-toolchain list | current | export | gc
+
+set -uo pipefail
+
+APP_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+TOOLCHAIN_ROOT="${PYPTO_TOOLCHAIN_ROOT:-/opt/pypto/toolchain}"
+CACHE_DIR="${PYPTO_TOOLCHAIN_CACHE:-/opt/pypto/cache}"
+RELEASE_BASE="https://github.com/pypto-tools/pypto-toolchain/releases/download"
+
+# The libstdc++ floor is set by ptoas, which is NOT part of the bundle: it is
+# pinned per-project and fetched per job, yet it links against GLIBCXX_3.4.29
+# while the HCE2 system libstdc++ stops at 3.4.28. Carrying a new enough
+# libstdc++ is the whole reason GCC is in the bundle at all, so verify asserts
+# it rather than assuming the build got it right.
+GLIBCXX_REQUIRED="3.4.29"
+
+RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+[ -t 1 ] || { RED=""; GREEN=""; YELLOW=""; DIM=""; RESET=""; }
+
+FAILURES=0
+ok()   { printf '  %s%-46s OK%s\n'   "$GREEN" "$1" "$RESET"; }
+bad()  { printf '  %s%-46s FAILED%s\n%s      %s%s\n' "$RED" "$1" "$RESET" "$DIM" "${2:-}" "$RESET"; FAILURES=$((FAILURES + 1)); }
+warn() { printf '  %s%-46s WARN%s\n%s      %s%s\n' "$YELLOW" "$1" "$RESET" "$DIM" "${2:-}" "$RESET"; }
+info() { printf '%s\n' "$*"; }
+die()  { printf '%serror: %s%s\n' "$RED" "$*" "$RESET" >&2; exit 1; }
+
+# Config precedence matches the existing pypto-setup convention, so this tool
+# and the scripts already deployed on these hosts read one file, not two.
+load_conf() {
+    local c
+    for c in "${PYPTO_ENV_CONF:-}" "$HOME/.config/pypto-env.conf" /etc/pypto-env.conf; do
+        if [ -n "$c" ] && [ -f "$c" ]; then
+            # shellcheck disable=SC1090
+            . "$c"
+            break
+        fi
+    done
+}
+load_conf
+
+# Numeric-aware >= over dotted versions. Used for glibc, GLIBCXX and --require
+# specs alike; `sort -V` handles 3.4.9 < 3.4.29, which a string compare does not.
+version_ge() { [ "$1" = "$2" ] || [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -1)" = "$1" ]; }
+
+host_glibc() { ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$'; }
+
+manifest_env() {
+    local version="$1" f="$APP_DIR/manifest/$1.env"
+    [ -f "$f" ] || die "no manifest for $version at $f
+  The CLI checkout is older than the version you asked for. Refresh it:
+    sudo git -C '$APP_DIR' pull"
+    printf '%s' "$f"
+}
+
+# Read a KEY from a bundle's own MANIFEST (space separated, generated at build).
+bundle_field() { awk -v k="$2" '$1 == k {print $2; exit}' "$1/MANIFEST" 2>/dev/null; }
+
+resolve_version() {
+    local v="${1:-}"
+    if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+    [ -L "$TOOLCHAIN_ROOT/current" ] || die "no version selected and no 'current' link; run: pypto-toolchain use <version>"
+    basename "$(readlink -f "$TOOLCHAIN_ROOT/current")"
+}
+
+# --- preflight ------------------------------------------------------------
+# Runs BEFORE any download. A host below the floor must be told so in one line,
+# not after pulling 150 MB and failing to exec a binary.
+preflight() {
+    local floor="$1" arch_want="$2" have
+    have="$(host_glibc)"
+    if [ -z "$have" ]; then
+        bad "glibc detection" "could not parse 'ldd --version'"
+        return 1
+    fi
+    if ! version_ge "$have" "$floor"; then
+        bad "glibc $have >= $floor" "This host cannot run this bundle.
+      Either upgrade glibc (note ptoas itself needs >= 2.34), or rebuild the
+      bundle on an older base image: edit FROM in docker/build.Dockerfile."
+        return 1
+    fi
+    ok "glibc $have >= $floor"
+
+    if [ "$(uname -m)" != "$arch_want" ]; then
+        bad "arch $(uname -m)" "bundle is for $arch_want"
+        return 1
+    fi
+    ok "arch $arch_want"
+
+    # /opt/pypto is commonly a symlink onto a roomier filesystem; df follows it.
+    local avail_kb
+    avail_kb="$(df -Pk "$(dirname "$TOOLCHAIN_ROOT")" 2>/dev/null | awk 'NR==2 {print $4}')"
+    if [ -n "$avail_kb" ] && [ "$avail_kb" -lt 2097152 ]; then
+        warn "disk $(( avail_kb / 1024 )) MiB free" "a bundle needs ~600 MiB unpacked; consider pointing /opt/pypto at a larger filesystem"
+    else
+        ok "disk $(( ${avail_kb:-0} / 1024 )) MiB free"
+    fi
+}
+
+# --- fetch ----------------------------------------------------------------
+# Local cache, then an intranet mirror, then the release. Every candidate is
+# checked against the same pinned sha256, so where the archive came from is a
+# deployment detail rather than a trust boundary — a colleague's scp and a
+# release download are equally safe.
+fetch_bundle() {
+    local version="$1" arch="$2" sha="$3"
+    local name="pypto-toolchain-${version}-${arch}.tar.gz"
+    local dest="$CACHE_DIR/$name" tmp
+
+    if [ -f "$dest" ] && echo "$sha  $dest" | sha256sum -c - >/dev/null 2>&1; then
+        info "  cache hit: $dest"
+        printf '%s' "$dest"; return 0
+    fi
+
+    mkdir -p "$CACHE_DIR" || die "cannot create $CACHE_DIR"
+    tmp="$(mktemp "$CACHE_DIR/.${name}.XXXXXX")" || die "cannot create temp file in $CACHE_DIR"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp'" EXIT
+
+    local url
+    for url in ${PYPTO_TOOLCHAIN_MIRROR:+"$PYPTO_TOOLCHAIN_MIRROR/$name"} \
+               "$RELEASE_BASE/$version/$name"; do
+        info "  fetching $url"
+        if curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 "$url" -o "$tmp"; then
+            if echo "$sha  $tmp" | sha256sum -c - >/dev/null 2>&1; then
+                mv -f "$tmp" "$dest"
+                trap - EXIT
+                printf '%s' "$dest"; return 0
+            fi
+            info "  ${YELLOW}sha256 mismatch from this source, trying next${RESET}"
+        fi
+    done
+    rm -f "$tmp"; trap - EXIT
+    die "could not obtain a bundle matching sha256 $sha
+  Tried the mirror (PYPTO_TOOLCHAIN_MIRROR) and the GitHub release.
+  On a host with a poor link to github.com, set a mirror in /etc/pypto-env.conf:
+    PYPTO_TOOLCHAIN_MIRROR=http://<intranet-host>:8080/toolchain"
+}
+
+# --- commands -------------------------------------------------------------
+cmd_install() {
+    local version="${1:-}" force=0
+    shift || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force) force=1; shift ;;
+            *) die "unknown argument: $1" ;;
+        esac
+    done
+    [ -n "$version" ] || die "usage: pypto-toolchain install <version> [--force]"
+
+    local menv arch arch_upper sha floor prefix
+    menv="$(manifest_env "$version")" || exit 1
+    # shellcheck disable=SC1090
+    . "$menv"
+    arch="$(uname -m)"
+    arch_upper="$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')"
+    eval "sha=\${BUNDLE_SHA256_${arch_upper}:-}"
+    [ -n "$sha" ] || die "manifest $menv has no BUNDLE_SHA256_${arch_upper}; this version was not built for $arch"
+    floor="${GLIBC_FLOOR:?manifest is missing GLIBC_FLOOR}"
+    prefix="$TOOLCHAIN_ROOT/$version"
+
+    info "installing pypto-toolchain $version ($arch)"
+    preflight "$floor" "$arch" || exit 1
+
+    if [ -d "$prefix" ] && [ "$force" -eq 0 ]; then
+        info "  already present at $prefix (use --force to reinstall)"
+        exec "$0" verify --version "$version"
+    fi
+
+    local archive
+    archive="$(fetch_bundle "$version" "$arch" "$sha")" || exit 1
+    ok "sha256 $sha"
+
+    mkdir -p "$TOOLCHAIN_ROOT" || die "cannot create $TOOLCHAIN_ROOT (need root?)"
+    # Unpack beside the target and swap in, so an interrupted extraction never
+    # leaves a half-populated prefix that later looks installed.
+    local staging="$TOOLCHAIN_ROOT/.staging-$version.$$"
+    rm -rf "$staging"; mkdir -p "$staging"
+    if ! tar xzf "$archive" -C "$staging"; then
+        rm -rf "$staging"; die "extraction failed"
+    fi
+    [ -d "$staging/$version" ] || { rm -rf "$staging"; die "archive does not contain '$version/' at its top level"; }
+    rm -rf "$prefix"
+    mv "$staging/$version" "$prefix"
+    rm -rf "$staging"
+    ok "unpacked to $prefix"
+
+    "$0" verify --version "$version"
+}
+
+cmd_use() {
+    local version="${1:-}"
+    [ -n "$version" ] || die "usage: pypto-toolchain use <version>"
+    [ -d "$TOOLCHAIN_ROOT/$version" ] || die "$version is not installed; run: pypto-toolchain install $version"
+    # Atomic swap: a job sourcing activate.sh mid-switch sees either the old or
+    # the new link, never a missing one.
+    ln -sfn "$version" "$TOOLCHAIN_ROOT/.current.$$" \
+        && mv -Tf "$TOOLCHAIN_ROOT/.current.$$" "$TOOLCHAIN_ROOT/current" \
+        || die "cannot update $TOOLCHAIN_ROOT/current (need root?)"
+    info "current -> $version"
+}
+
+# Capability assertion. Consumers state what they need rather than which bundle
+# version provides it, so upgrading the bundle never requires editing a
+# consumer repository.  Spec: <component><op><version>, e.g. gcc'>='15
+check_require() {
+    local prefix="$1" spec="$2" comp op want have
+    comp="${spec%%[=><]*}"
+    op="$(printf '%s' "$spec" | grep -oE '(>=|<=|=)' | head -1)"
+    want="${spec##*[=><]}"
+    case "$comp" in
+        python) have="$(bundle_field "$prefix" PYTHON_VERSION)" ;;
+        gcc)    have="$(bundle_field "$prefix" GCC_VERSION)" ;;
+        ccache) have="$(bundle_field "$prefix" CCACHE_VERSION)" ;;
+        uv)     have="$(bundle_field "$prefix" UV_VERSION)" ;;
+        *) bad "require $spec" "unknown component '$comp'"; return ;;
+    esac
+    [ -n "$have" ] || { bad "require $spec" "MANIFEST has no version for $comp"; return; }
+
+    case "$op" in
+        '>=') version_ge "$have" "$want" && ok "require $spec (have $have)" || bad "require $spec" "have $have" ;;
+        # `=` means "starts with", so python=3.10 accepts 3.10.18 — pinning a
+        # patch level in every consumer would defeat the point of the assertion.
+        '=')  case "$have" in "$want"|"$want".*) ok "require $spec (have $have)" ;; *) bad "require $spec" "have $have" ;; esac ;;
+        *) bad "require $spec" "unsupported operator (use '=' or '>=')" ;;
+    esac
+}
+
+cmd_verify() {
+    local version="" requires=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --version) version="$2"; shift 2 ;;
+            --require) requires+=("$2"); shift 2 ;;
+            *) die "unknown argument: $1" ;;
+        esac
+    done
+    version="$(resolve_version "$version")" || exit 1
+    local prefix="$TOOLCHAIN_ROOT/$version"
+    [ -d "$prefix" ] || die "$version is not installed at $prefix"
+    [ -f "$prefix/MANIFEST" ] || die "$prefix has no MANIFEST; the install is incomplete"
+
+    info "verifying pypto-toolchain $version at $prefix"
+
+    local floor arch
+    floor="$(bundle_field "$prefix" GLIBC_FLOOR)"
+    arch="$(bundle_field "$prefix" BUNDLE_ARCH)"
+    preflight "${floor:-0}" "${arch:-$(uname -m)}"
+
+    # The prefix is compiled into the GCC driver and Python's sysconfig, so a
+    # bundle unpacked anywhere other than where it was built is subtly broken
+    # in ways the smoke tests below may not catch. Check it explicitly.
+    local built_prefix
+    built_prefix="$(bundle_field "$prefix" BUNDLE_PREFIX)"
+    if [ "$built_prefix" = "$prefix" ]; then
+        ok "prefix matches build ($prefix)"
+    else
+        bad "prefix matches build" "built for '$built_prefix' but installed at '$prefix'"
+    fi
+
+    # Checksums of the load-bearing binaries: catches a truncated extraction or
+    # a file someone replaced by hand.
+    local bad_files=0 rel want got
+    while read -r _ rel want; do
+        got="$(sha256sum "$prefix/$rel" 2>/dev/null | cut -d' ' -f1)"
+        [ "$got" = "$want" ] || { bad_files=$((bad_files + 1)); info "      ${DIM}mismatch: $rel${RESET}"; }
+    done < <(grep '^FILE_SHA256 ' "$prefix/MANIFEST")
+    if [ "$bad_files" -eq 0 ]; then
+        ok "component checksums ($(grep -c '^FILE_SHA256 ' "$prefix/MANIFEST") files)"
+    else
+        bad "component checksums" "$bad_files file(s) do not match MANIFEST"
+    fi
+
+    # libstdc++ floor. Not a smoke test of the bundle itself but of the reason
+    # it carries GCC: ptoas needs GLIBCXX_3.4.29 and no distro in the fleet
+    # provides it.
+    local glibcxx
+    glibcxx="$(bundle_field "$prefix" GLIBCXX_MAX)"
+    glibcxx="${glibcxx#GLIBCXX_}"
+    if [ -n "$glibcxx" ] && version_ge "$glibcxx" "$GLIBCXX_REQUIRED"; then
+        ok "libstdc++ GLIBCXX_$glibcxx >= $GLIBCXX_REQUIRED"
+    else
+        bad "libstdc++ GLIBCXX >= $GLIBCXX_REQUIRED" "bundle provides '${glibcxx:-unknown}'; ptoas will not load"
+    fi
+
+    # --- smoke tests: prove it runs, not merely that the bytes are right ---
+    local out
+    if out="$("$prefix/python/bin/python3.10" -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip;print("ok")' 2>&1)" \
+       && [ "$out" = "ok" ]; then
+        ok "python3.10 stdlib (ssl/ctypes/sqlite3/lzma/venv)"
+    else
+        bad "python3.10 stdlib" "$out"
+    fi
+
+    local probe; probe="$(mktemp -u)"
+    if out="$(echo 'int main(){return 0;}' | "$prefix/gcc/bin/g++-15" -std=c++23 -x c++ - -o "$probe" 2>&1)" \
+       && "$probe"; then
+        ok "g++-15 compiles and links -std=c++23"
+    else
+        bad "g++-15 compiles and links -std=c++23" "$out"
+    fi
+    rm -f "$probe"
+
+    if CCACHE_NAMESPACE=probe "$prefix/bin/ccache" -p 2>/dev/null | grep -qi namespace; then
+        ok "ccache honours CCACHE_NAMESPACE"
+    else
+        bad "ccache honours CCACHE_NAMESPACE" \
+            "this ccache ignores it silently, which would let a pto-isa bump reuse objects built against the old ISA"
+    fi
+
+    if out="$("$prefix/bin/uv" --version 2>&1)"; then ok "uv ($out)"; else bad "uv" "$out"; fi
+
+    # ptoas lives outside the bundle (pinned per project, fetched per job), so
+    # this is opportunistic: if the host happens to have one, prove the bundle's
+    # libstdc++ actually satisfies it. env -i on purpose — an inherited
+    # LD_LIBRARY_PATH would let a host that is really broken look fine.
+    local ptoas
+    ptoas="$(command -v ptoas 2>/dev/null)"
+    if [ -n "$ptoas" ]; then
+        if env -i PATH=/usr/bin:/bin LD_LIBRARY_PATH="$prefix/gcc/lib64" "$ptoas" --version >/dev/null 2>&1; then
+            ok "ptoas loads against the bundle's libstdc++"
+        else
+            bad "ptoas loads against the bundle's libstdc++" "$ptoas failed to start under env -i"
+        fi
+    fi
+
+    # CANN is machine-bound: detected, never deployed.
+    local cann="${ASCEND_HOME_PATH:-${CANN_ROOT:-/usr/local/Ascend/cann-9.0.0}}"
+    if [ -f "$cann/set_env.sh" ]; then ok "CANN detected ($cann)"; else warn "CANN not found at $cann" "device jobs will fail; simulator and codegen jobs are unaffected"; fi
+
+    local spec
+    for spec in "${requires[@]+"${requires[@]}"}"; do check_require "$prefix" "$spec"; done
+
+    echo
+    if [ "$FAILURES" -eq 0 ]; then
+        printf '%s✅ pypto-toolchain %s ready%s\n' "$GREEN" "$version" "$RESET"
+        printf '   source %s/activate.sh\n' "$TOOLCHAIN_ROOT/current"
+        return 0
+    fi
+    printf '%s❌ %d check(s) failed%s\n' "$RED" "$FAILURES" "$RESET"
+    return 1
+}
+
+cmd_list() {
+    [ -d "$TOOLCHAIN_ROOT" ] || { info "no bundles installed under $TOOLCHAIN_ROOT"; return 0; }
+    local cur d v
+    cur="$(readlink "$TOOLCHAIN_ROOT/current" 2>/dev/null || true)"
+    for d in "$TOOLCHAIN_ROOT"/*/; do
+        v="$(basename "$d")"
+        [ "$v" = "current" ] && continue
+        [ -f "$d/MANIFEST" ] || continue
+        printf '  %s %-14s gcc %-8s python %-9s ccache %s\n' \
+            "$([ "$v" = "$cur" ] && printf '*' || printf ' ')" "$v" \
+            "$(bundle_field "$d" GCC_VERSION)" "$(bundle_field "$d" PYTHON_VERSION)" \
+            "$(bundle_field "$d" CCACHE_VERSION)"
+    done
+}
+
+cmd_gc() {
+    local keep=2
+    while [ $# -gt 0 ]; do
+        case "$1" in --keep) keep="$2"; shift 2 ;; *) die "unknown argument: $1" ;; esac
+    done
+    local cur; cur="$(readlink "$TOOLCHAIN_ROOT/current" 2>/dev/null || true)"
+    # Newest first, never touching whatever `current` points at.
+    local victims=() v
+    while read -r v; do
+        [ "$v" = "$cur" ] && continue
+        victims+=("$v")
+    done < <(find "$TOOLCHAIN_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -Vr | tail -n "+$keep")
+    if [ "${#victims[@]}" -eq 0 ]; then info "nothing to remove (keeping $keep, current=$cur)"; return 0; fi
+    for v in "${victims[@]}"; do
+        info "removing $TOOLCHAIN_ROOT/$v"
+        rm -rf "${TOOLCHAIN_ROOT:?}/$v"
+    done
+}
+
+# Emits `export` lines for eval. Supersedes the hand-deployed pypto-setup
+# --export: it re-emits the bundle's own activate.sh and then the host-level
+# paths that live in pypto-env.conf but outside the bundle.
+cmd_export() {
+    local version; version="$(resolve_version "${1:-}")" || exit 1
+    cat "$TOOLCHAIN_ROOT/$version/activate.sh"
+    [ -n "${PTOAS_ROOT:-}" ]       && printf 'export PTOAS_ROOT=%q\n' "$PTOAS_ROOT"
+    [ -n "${ASCEND_HOME_PATH:-}" ] && printf 'export ASCEND_HOME_PATH=%q\n' "$ASCEND_HOME_PATH"
+    [ -n "${MODELS_ROOT:-}" ]      && printf 'export MODELS_ROOT=%q\n' "$MODELS_ROOT"
+    true
+}
+
+usage() {
+    cat <<'EOF'
+pypto-toolchain — deploy and verify PyPTO toolchain bundles
+
+  install <version> [--force]     download, preflight, unpack, verify
+  use <version>                   point `current` at an installed version
+  verify [--version V] [--require SPEC]...
+                                  checksums + smoke tests; SPEC is e.g.
+                                  python=3.10, gcc'>='15, ccache'>='4.8
+  list                            installed versions (* = current)
+  current                         print the selected version
+  export [version]                emit `export` lines for eval
+  gc [--keep N]                   remove old versions (default keep 2)
+
+Paths come from /etc/pypto-env.conf (or ~/.config/pypto-env.conf):
+  PYPTO_TOOLCHAIN_ROOT    default /opt/pypto/toolchain
+  PYPTO_TOOLCHAIN_CACHE   default /opt/pypto/cache
+  PYPTO_TOOLCHAIN_MIRROR  optional intranet base URL, tried before the release
+EOF
+}
+
+case "${1:-}" in
+    install) shift; cmd_install "$@" ;;
+    use)     shift; cmd_use "$@" ;;
+    verify)  shift; cmd_verify "$@" ;;
+    list)    shift; cmd_list "$@" ;;
+    current) resolve_version "" && echo ;;
+    export)  shift; cmd_export "$@" ;;
+    gc)      shift; cmd_gc "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) die "unknown command: $1 (try --help)" ;;
+esac

@@ -1,0 +1,4 @@
+# Build output: tarballs, per-arch MANIFEST dumps, sha256 sidecars.
+# manifest/<version>.env is NOT ignored — it is the committed source of truth
+# that install.sh reads.
+/dist/
