@@ -2,12 +2,17 @@ name: Verify bundle
 
 # Installs a published bundle the way a real host does and exercises it.
 #
-# The runners are the point. A GitHub runner is Ubuntu 24.04 — glibc 2.39,
-# libffi.so.8, OpenSSL 3 — while the bundle is built inside AlmaLinux 8 with
-# glibc 2.28, libffi.so.6 and OpenSSL 1.1. That mismatch is exactly the one that
-# shipped a bundle whose Python could not `import ctypes` on a fleet machine, so
-# a foreign OS is a better test bed here than a machine resembling the build
-# image. It also costs no self-hosted capacity.
+# The test bed is the point: AlmaLinux 9, one major release NEWER than the
+# AlmaLinux 8 the bundle is built in. glibc 2.34, libffi.so.8 and OpenSSL 3
+# against a bundle carrying libffi.so.6 and OpenSSL 1.1 — the exact mismatch
+# that shipped a bundle whose Python could not `import ctypes` on a fleet
+# machine. Its glibc is also 2.34, the same as the fleet's own hosts.
+#
+# NOT the runner's own Ubuntu, despite it being free. GCC resolves crt1.o and
+# friends through library paths baked in at configure time, in the build image's
+# RHEL layout (/usr/lib64); Debian's multiarch layout puts them elsewhere, so
+# linking fails there with "cannot find crt1.o" — a limitation of the bundle's
+# target, not a defect in it. Every host in this fleet is RHEL-family.
 #
 # What this does NOT cover: an NPU, CANN, or the fleet's own kernel. Those need a
 # self-hosted runner and are checked by installing on a real host.
@@ -47,8 +52,20 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    container: almalinux:9
     timeout-minutes: 30
     steps:
+      - name: Host prerequisites
+        # binutils and glibc-devel are what the bundle expects FROM the host: it
+        # ships a compiler, not a C runtime, so `as`, `ld` and crt1.o come from
+        # the machine. Installing them here states that contract explicitly
+        # rather than leaving it implied by whatever the runner happened to have.
+        # git/curl/tar are for install.sh itself.
+        run: |
+          dnf install -y --setopt=tsflags=nodocs \
+              binutils glibc-devel git curl tar findutils diffutils
+          echo "$(. /etc/os-release && echo "$PRETTY_NAME")  glibc $(ldd --version | head -1 | grep -oE '[0-9.]+$')"
+
       - uses: actions/checkout@v4
 
       - name: Resolve version
@@ -70,12 +87,12 @@ jobs:
         # is this revision and not whatever main happens to hold.
         env:
           PYPTO_TOOLCHAIN_REPO: ${{ github.workspace }}
-        run: sudo -E bash install.sh
+        run: bash install.sh
 
       - name: Install and select the bundle
         run: |
-          sudo pypto-toolchain install "${{ steps.v.outputs.version }}"
-          sudo pypto-toolchain use     "${{ steps.v.outputs.version }}"
+          pypto-toolchain install "${{ steps.v.outputs.version }}"
+          pypto-toolchain use     "${{ steps.v.outputs.version }}"
 
       - name: Verify
         # The same capability assertions the PyPTO repositories make, so a bundle

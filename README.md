@@ -120,3 +120,23 @@ contract, not a survey of current machines: a host added next year needs no
 re-testing, and `install.sh` refuses to install on anything below it, before
 downloading. For scale, `ptoas` itself already requires `GLIBC_2.34`, so this
 floor will never be the binding constraint.
+
+## What the host must still provide
+
+The bundle carries a compiler, not a C library. Two things come from the machine:
+
+| From the host | Why |
+| --- | --- |
+| `binutils` (`as`, `ld`) | GCC drives the system assembler and linker |
+| `glibc-devel` (`crt1.o`, `libc.so`) | the C runtime startup files every link needs |
+
+`verify` checks for both, because their absence otherwise surfaces as
+`cannot find crt1.o` from the linker — which reads like a corrupt bundle rather
+than a missing package.
+
+**RHEL-family hosts only.** GCC resolves those files through library paths baked
+in at configure time, in the build image's layout (`/usr/lib64`). Debian and
+Ubuntu place them under a multiarch triplet directory instead, so linking fails
+there. Every machine in this fleet runs an RHEL derivative (HCE2, openEuler);
+supporting Debian would mean shipping a sysroot, which is a different and much
+larger artifact.

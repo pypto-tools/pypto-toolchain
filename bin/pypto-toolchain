@@ -393,6 +393,21 @@ cmd_verify() {
         bad "python3.10 stdlib imports" "$out"
     fi
 
+    # The bundle ships a compiler, not a C runtime: `as` and `ld` come from the
+    # host's binutils, and crt1.o from its glibc development package. Checked
+    # separately because their absence surfaces as "cannot find crt1.o" from the
+    # linker, which reads like a corrupt bundle rather than a missing package.
+    local crt
+    crt="$(run_in_env "$prefix/gcc/bin/g++-15" -print-file-name=crt1.o 2>/dev/null)"
+    if [ -e "$crt" ] && command -v as >/dev/null 2>&1 && command -v ld >/dev/null 2>&1; then
+        ok "host binutils and C runtime present"
+    else
+        bad "host binutils and C runtime present" \
+            "the bundle carries a compiler but not a libc; install binutils and glibc-devel
+      (dnf install binutils glibc-devel). Note the bundle assumes an RHEL-family
+      layout for these — Debian's multiarch paths are not supported."
+    fi
+
     local probe; probe="$(mktemp -u)"
     if out="$(echo 'int main(){return 0;}' \
                 | run_in_env "$prefix/gcc/bin/g++-15" -std=c++23 -x c++ - -o "$probe" 2>&1)" \
