@@ -574,23 +574,6 @@ cmd_doctor() {
         bad "binutils + C runtime" "dnf install binutils glibc-devel"
     fi
 
-    # ccache is the one host tool the bundle replaces that CI silently depends
-    # on: below 4.8 it ignores CCACHE_NAMESPACE, which is how the pto-isa cache
-    # is scoped. Report where the working one comes from, because if it is
-    # conda's it disappears the moment conda does.
-    if command -v ccache >/dev/null 2>&1; then
-        local cc_path cc_ver
-        cc_path="$(command -v ccache)"; cc_ver="$(ccache --version | sed -n '1s/[^0-9]*\([0-9][0-9.]*\).*/\1/p')"
-        if CCACHE_NAMESPACE=probe ccache -p 2>/dev/null | grep -qi namespace; then
-            ok "ccache $cc_ver honours CCACHE_NAMESPACE"
-        else
-            warn "ccache $cc_ver ignores CCACHE_NAMESPACE" "the bundle supplies 4.10; until then pto-isa cache scoping is a no-op here"
-        fi
-        info "      ${DIM}$cc_path${RESET}"
-    else
-        warn "no ccache on PATH" "the bundle supplies one"
-    fi
-
     local cann
     cann="$(detect_cann)"
     if [ -n "$cann" ]; then
@@ -598,23 +581,6 @@ cmd_doctor() {
         info "      ${DIM}$cann${RESET}"
     else
         warn "no CANN" "device jobs cannot run here; simulator and codegen jobs can"
-    fi
-
-    # conda is not a fault, but which envs carry pypto is: with the venvs those
-    # CI jobs build on --system-site-packages, a failed install in the venv is
-    # masked by the copy in the base env.
-    local conda_root="${CONDA_ROOT:-$HOME/miniconda3}" e n
-    if [ -d "$conda_root/envs" ]; then
-        for e in "$conda_root"/envs/*/; do
-            [ -x "$e/bin/python" ] || continue
-            n="$(basename "$e")"
-            if "$e/bin/python" -c 'import pypto' 2>/dev/null; then
-                warn "conda env '$n' has pypto installed" "with --system-site-packages it can shadow a venv build; removed by the migration"
-            fi
-        done
-        info "conda at $conda_root ($(ls -1 "$conda_root/envs" | wc -l) envs)"
-    else
-        info "no conda under $conda_root"
     fi
 
     # Where the 200 MB would land, and whether this host can fetch it at all.
@@ -630,9 +596,52 @@ cmd_doctor() {
         warn "github not reachable" "sideload into $CACHE_DIR, or set PYPTO_TOOLCHAIN_MIRROR"
     fi
 
+    # --- migration notes ---------------------------------------------------
+    # Nothing below gates installing a bundle. These describe the state this
+    # machine is in TODAY, before the migration, and they are what decides the
+    # order of the remaining work. Both go quiet once it is done: the bundle
+    # supplies ccache, and the venvs stop using --system-site-packages.
     echo
-    [ "$FAILURES" -eq 0 ] && printf '%s✅ ready to install%s\n' "$GREEN" "$RESET" \
-                          || printf '%s❌ %d blocking issue(s)%s\n' "$RED" "$FAILURES" "$RESET"
+    info "migration notes (do not block installing):"
+
+    # The HOST's ccache, not the bundle's — verify covers that one. Below 4.8 it
+    # ignores CCACHE_NAMESPACE, so the pto-isa cache scoping in CI is a silent
+    # no-op here today. And if the working one came from conda, it disappears
+    # the moment conda does, which is why conda is removed last.
+    if command -v ccache >/dev/null 2>&1; then
+        local cc_path cc_ver
+        cc_path="$(command -v ccache)"; cc_ver="$(ccache --version | sed -n '1s/[^0-9]*\([0-9][0-9.]*\).*/\1/p')"
+        if CCACHE_NAMESPACE=probe ccache -p 2>/dev/null | grep -qi namespace; then
+            ok "ccache $cc_ver honours CCACHE_NAMESPACE"
+        else
+            warn "ccache $cc_ver ignores CCACHE_NAMESPACE" "the bundle supplies 4.10; until then pto-isa cache scoping is a no-op here"
+        fi
+        info "      ${DIM}$cc_path${RESET}"
+    else
+        warn "no ccache on PATH" "the bundle supplies one"
+    fi
+
+    # conda is not a fault, but which envs carry pypto is: with the venvs those
+    # CI jobs build on --system-site-packages, a failed install in the venv is
+    # masked by the copy in the base env. Also a pre-migration condition.
+    local conda_root="${CONDA_ROOT:-$HOME/miniconda3}" e n
+    if [ -d "$conda_root/envs" ]; then
+        for e in "$conda_root"/envs/*/; do
+            [ -x "$e/bin/python" ] || continue
+            n="$(basename "$e")"
+            if "$e/bin/python" -c 'import pypto' 2>/dev/null; then
+                warn "conda env '$n' has pypto installed" "with --system-site-packages it can shadow a venv build; removed by the migration"
+            fi
+        done
+        info "conda at $conda_root ($(ls -1 "$conda_root/envs" | wc -l) envs)"
+    else
+        info "no conda under $conda_root"
+    fi
+
+
+    echo
+    [ "$FAILURES" -eq 0 ] && printf '%s✅ ready to install a bundle%s\n' "$GREEN" "$RESET" \
+                          || printf '%s❌ %d issue(s) block installing a bundle%s\n' "$RED" "$FAILURES" "$RESET"
     return $(( FAILURES > 0 ))
 }
 
