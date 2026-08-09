@@ -52,7 +52,6 @@ ARG GCC_VERSION=15.2.0
 ARG PYTHON_VERSION=3.10.18
 ARG UV_VERSION=0.9.28
 ARG CCACHE_VERSION=4.10.2
-ARG PATCHELF_VERSION=0.18.0
 
 # Source mirrors. Default to upstream; scripts/build.sh overrides them with the
 # domestic mirrors when building from inside the corporate network.
@@ -97,20 +96,6 @@ RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
 # RHEL — enabling it would reintroduce exactly the base-image coupling that
 # download_prerequisites was chosen to avoid.
 
-# patchelf is absent from the EL8 repositories, yet the $ORIGIN-relative RPATHs
-# it writes are what let the bundle resolve its own libraries with nothing set
-# in the environment — a toolchain that only works once LD_LIBRARY_PATH is right
-# is precisely the fragility this bundle exists to remove.
-#
-# Its own release tarball, not pip: this image has no python3 at all (dnf runs
-# on a private platform-python), and EL8's pip is too old to install the wheel
-# even after adding one. Not EPEL either, whose name and default-enabled state
-# differ across RHEL 8 rebuilds.
-RUN curl -fsSL --retry 5 \
-      "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-$(uname -m).tar.gz" \
-    | tar xz -C /usr/local ./bin/patchelf \
-    && patchelf --version
-
 WORKDIR /build
 
 # --- GCC ------------------------------------------------------------------
@@ -138,23 +123,6 @@ RUN curl -fsSL --retry 5 \
     && make -j"$(nproc)" \
     && make install-strip \
     && cd /build && rm -rf gcc-${GCC_VERSION} gcc-build
-
-# GCC's driver and cc1plus are themselves C++ programs, linked against the
-# libstdc++ the bootstrap just built. activate.sh already puts gcc/lib64 on
-# LD_LIBRARY_PATH, so this is belt-and-braces: an $ORIGIN-relative RPATH lets
-# them resolve it even when invoked from an environment nobody activated.
-# bundle-libs.sh re-applies RPATHs across the whole prefix later; this early
-# pass just keeps the GCC that follows usable inside the build itself.
-#
-# $ORIGIN is single-quoted so the shell passes it through literally; it is
-# resolved by the dynamic loader at run time, not here.
-RUN if command -v patchelf >/dev/null 2>&1; then \
-        find "${PREFIX}/gcc/bin" "${PREFIX}/gcc/libexec" -type f -executable -print0 \
-          | xargs -0 -r -n1 sh -c 'patchelf --set-rpath '"'"'$ORIGIN/../lib64:$ORIGIN/../../../../lib64'"'"' "$0" 2>/dev/null || true'; \
-        echo "RPATH set on gcc binaries"; \
-    else \
-        echo "patchelf unavailable; relying on activate.sh LD_LIBRARY_PATH"; \
-    fi
 
 # --- Python ---------------------------------------------------------------
 # --enable-shared plus an RPATH to its own lib: extension builds (nanobind via
@@ -224,11 +192,3 @@ RUN mkdir -p "${PREFIX}" \
     && PREFIX="${PREFIX}" bash /usr/local/bin/gen-activate.sh \
     && PREFIX="${PREFIX}" bash /usr/local/bin/gen-manifest.sh > "${PREFIX}/MANIFEST" \
     && cat "${PREFIX}/MANIFEST"
-
-# Smoke-test inside the build, so a broken bundle never reaches a machine.
-RUN set -eux; \
-    "${PREFIX}/python/bin/python3.10" -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip'; \
-    echo 'int main(){}' | "${PREFIX}/gcc/bin/g++-15" -std=c++23 -x c++ - -o /tmp/probe; \
-    "${PREFIX}/bin/ccache" --version; \
-    CCACHE_NAMESPACE=probe "${PREFIX}/bin/ccache" -p | grep -qi namespace; \
-    "${PREFIX}/bin/uv" --version

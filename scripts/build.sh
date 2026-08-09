@@ -218,6 +218,20 @@ echo "    cache   ${PYPTO_BUILD_CACHE:-none}"
     -t "$IMAGE" \
     .
 
+# Smoke-tested here rather than as the Dockerfile's last layer. As a layer, a
+# failing test failed the build, and BuildKit exports no cache from a failed
+# build -- so every attempt recompiled GCC and Python from scratch, two hours a
+# time, three times in a row on x86_64. Run against the finished image instead:
+# the build itself succeeds and its cache is kept, while a failure here still
+# stops the tarball being produced.
+echo "==> smoke-testing the image"
+"${DOCKER[@]}" run --rm "$IMAGE" bash -c "set -eux
+  '$PREFIX/python/bin/python3.10' -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip'
+  echo 'int main(){}' | '$PREFIX/gcc/bin/g++-15' -std=c++23 -x c++ - -o /tmp/probe
+  '$PREFIX/bin/ccache' --version
+  CCACHE_NAMESPACE=probe '$PREFIX/bin/ccache' -p | grep -qi namespace
+  '$PREFIX/bin/uv' --version"
+
 echo "==> exporting $TARBALL"
 mkdir -p "$OUT_DIR"
 # Tar with the version directory as the single top-level entry, so unpacking at

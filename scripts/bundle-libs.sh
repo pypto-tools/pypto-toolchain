@@ -91,18 +91,15 @@ for _ in 1 2 3 4 5; do
 done
 echo "== $prev libraries bundled"
 
-# Deliberately NOT rewriting RPATHs across the whole prefix. A pass that did
-# corrupted libpython3.10.so.1.0 on x86_64 — "ELF load command address/offset
-# not properly aligned" — because patchelf has to shift PT_LOAD segments to make
-# room, and gets that wrong on some layouts. The self-containment check below did
-# not notice: ldd still prints a sensible answer for a library the loader then
-# refuses. Rewriting every ELF in the bundle risks more than it buys.
+# No patchelf anywhere in this build. Rewriting an RPATH means shifting PT_LOAD
+# segments, and patchelf gets that wrong on some layouts: it corrupted
+# libpython3.10.so.1.0 on x86_64, and after that pass was narrowed to GCC's own
+# directories it corrupted liblto_plugin.so instead. ldd does not notice -- it
+# prints a sensible answer for a library the loader then refuses to map -- so
+# only the smoke test stood between those bundles and a machine.
 #
-# The two places an RPATH genuinely earns its keep are handled where they are
-# built instead: Python links with -Wl,-rpath pointing at python/lib and
-# lib/bundled, and GCC's driver gets an $ORIGIN-relative RPATH over its own bin
-# and libexec only. Everything else resolves through activate.sh, which is how
-# consumers enter the bundle anyway.
+# Python gets its RPATH from the linker at configure time, which is reliable.
+# Everything else resolves through activate.sh, the documented way in.
 
 # The guard. With only the bundle's own directories on the search path, nothing
 # may be missing and nothing may resolve back to the build image. If this passes,
