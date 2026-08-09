@@ -32,12 +32,21 @@ mkdir -p "$BUNDLED"
 # reliable way to produce a bundle that segfaults. libstdc++/libgcc_s are
 # excluded for a different reason — the bundle already carries its own under
 # gcc/lib64, which activate.sh puts first.
+#
+# libcrypt and libnsl are NOT on this list, though they look like they belong.
+# glibc dropped both after 2.28: EL8 still ships them inside glibc, while EL9
+# and anything newer take them from separate libxcrypt and libnsl2 packages that
+# a minimal install does not have. Treating them as core produced a bundle whose
+# Python would not start on AlmaLinux 9 ("libcrypt.so.1: cannot open shared
+# object file") while working on a fleet host that happened to have libxcrypt.
+# They are leaf libraries with no tie to the loader, so bundling them is safe in
+# the way bundling libc would not be.
 is_core_lib() {
     # By basename: ldd names the loader by absolute path
     # ("/lib/ld-linux-aarch64.so.1 (0x...)"), unlike every other entry.
     case "$(basename "$1")" in
         libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|libutil.so.*|\
-        libnsl.so.*|libresolv.so.*|libcrypt.so.*|libanl.so.*|\
+        libresolv.so.*|libanl.so.*|\
         ld-linux*.so.*|ld64.so.*|linux-vdso.so.*|\
         libstdc++.so.*|libgcc_s.so.*) return 0 ;;
         *) return 1 ;;
