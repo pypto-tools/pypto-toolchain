@@ -109,7 +109,21 @@ bundle_field() { awk -v k="$2" '$1 == k {print $2; exit}' "$1/MANIFEST" 2>/dev/n
 resolve_version() {
     local v="${1:-}"
     if [ -n "$v" ]; then printf '%s' "$v"; return; fi
-    [ -L "$TOOLCHAIN_ROOT/current" ] || die "no version selected and no 'current' link; run: pypto-toolchain use <version>"
+    # Distinguish "nothing installed" from "installed but never selected". The
+    # second is easy to reach -- install puts the bytes on disk, use creates the
+    # link -- and in a CI log the old wording read as though the host had no
+    # bundle at all, sending people to reinstall something already present.
+    if [ ! -L "$TOOLCHAIN_ROOT/current" ]; then
+        local have
+        have="$(find "$TOOLCHAIN_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null)"
+        if [ -n "$have" ]; then
+            die "no version is selected on this host, though these are installed: $have
+  'install' unpacks a version; 'use' is what points 'current' at one:
+    sudo pypto-toolchain use <version>"
+        fi
+        die "no bundle is installed under $TOOLCHAIN_ROOT
+    sudo pypto-toolchain install <version> && sudo pypto-toolchain use <version>"
+    fi
     basename "$(readlink -f "$TOOLCHAIN_ROOT/current")"
 }
 
