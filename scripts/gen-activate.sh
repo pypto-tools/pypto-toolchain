@@ -37,7 +37,11 @@ export PATH="$PYPTO_TOOLCHAIN/bin:$PYPTO_TOOLCHAIN/gcc/bin:$PYPTO_TOOLCHAIN/pyth
 # the HCE2 system libstdc++ stops at 3.4.28). The ${VAR:+:...} guard keeps an
 # empty inherited value from leaving a trailing colon, which the dynamic loader
 # reads as "the current directory".
-export LD_LIBRARY_PATH="$PYPTO_TOOLCHAIN/gcc/lib64:$PYPTO_TOOLCHAIN/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# lib/bundled holds the non-glibc libraries copied out of the build image
+# (libffi, libssl, libsqlite3, ...). They are matched by SONAME, so a newer host
+# does not satisfy them — it simply lacks them, and importing ctypes or ssl
+# fails outright.
+export LD_LIBRARY_PATH="$PYPTO_TOOLCHAIN/gcc/lib64:$PYPTO_TOOLCHAIN/python/lib:$PYPTO_TOOLCHAIN/lib/bundled${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 PREFIX_EOF
 
 # Substitute the placeholder with the real prefix. Done after the fact so the

@@ -197,7 +197,14 @@ RUN arch="$(uname -m)" \
 # heredoc inside RUN only parses under BuildKit's own heredoc form, and the
 # double-escaping needed to satisfy both the Dockerfile and the shell parser
 # makes the generated file impossible to review.
-COPY scripts/gen-activate.sh scripts/gen-manifest.sh /usr/local/bin/
+COPY scripts/gen-activate.sh scripts/gen-manifest.sh scripts/bundle-libs.sh /usr/local/bin/
+
+# Must run before the manifest: it adds files to the prefix, and it is the check
+# that the bundle carries every non-glibc library it needs rather than borrowing
+# them from this image. Without it the bundle installs cleanly and then fails at
+# `import ctypes` on a host whose libffi has a different SONAME.
+RUN PREFIX="${PREFIX}" bash /usr/local/bin/bundle-libs.sh
+
 RUN mkdir -p "${PREFIX}" \
     && PREFIX="${PREFIX}" bash /usr/local/bin/gen-activate.sh \
     && PREFIX="${PREFIX}" bash /usr/local/bin/gen-manifest.sh > "${PREFIX}/MANIFEST" \
