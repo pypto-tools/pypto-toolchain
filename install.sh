@@ -22,7 +22,11 @@
 set -euo pipefail
 
 REPO_URL="${PYPTO_TOOLCHAIN_REPO:-https://github.com/pypto-tools/pypto-toolchain.git}"
-APP_DIR="/home/pypto-tools/pypto-toolchain/app"
+# Everything this tool owns lives under one prefix: the CLI checkout, the
+# bundles and the download cache. Uninstalling is then `rm -rf /opt/pypto` plus
+# the symlink below, and since /opt/pypto is usually redirected to a roomier
+# filesystem (see --storage), none of it lands on the root partition.
+APP_DIR="/opt/pypto/app"
 BIN_LINK="/usr/local/bin/pypto-toolchain"
 STORAGE=""
 VERSION=""
@@ -71,8 +75,14 @@ else
 fi
 mkdir -p /opt/pypto/toolchain /opt/pypto/cache
 
-# Deployed like the other tools already on these hosts
-# (/home/pypto-tools/<tool>/app/<entry> linked into /usr/local/bin).
+# An earlier layout put the CLI beside the other host tools in
+# /home/pypto-tools/<tool>/app. Point it out rather than deleting anything under
+# a home directory unprompted.
+if [ -d /home/pypto-tools/pypto-toolchain ]; then
+    echo "note: an old checkout remains at /home/pypto-tools/pypto-toolchain."
+    echo "      It is no longer used — remove it once this install verifies."
+fi
+
 mkdir -p "$(dirname "$APP_DIR")"
 if [ -d "$APP_DIR/.git" ]; then
     echo "updating $APP_DIR"
