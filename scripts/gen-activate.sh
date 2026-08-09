@@ -37,18 +37,20 @@ export PATH="$PYPTO_TOOLCHAIN/bin:$PYPTO_TOOLCHAIN/gcc/bin:$PYPTO_TOOLCHAIN/pyth
 # the HCE2 system libstdc++ stops at 3.4.28). The ${VAR:+:...} guard keeps an
 # empty inherited value from leaving a trailing colon, which the dynamic loader
 # reads as "the current directory".
-# lib/bundled holds the non-glibc libraries copied out of the build image
-# (libffi, libssl, libsqlite3, ...) and goes LAST, so it is a fallback rather
-# than an override. Everything launched from this environment inherits
-# LD_LIBRARY_PATH, host programs included: with lib/bundled first, HCE2's
-# /usr/bin/ssh loaded AlmaLinux's libcrypto.so.1.1 in place of the vendor build
-# it was linked against and died on a missing EVP_sm4_ctr. A host that has a
-# library keeps its own; one that does not falls through to the bundle's, which
-# is all these copies were ever for.
+# lib/bundled is deliberately NOT here. LD_LIBRARY_PATH is inherited by every
+# program started from this environment, host binaries included, and it is
+# consulted before the ldconfig cache at any position — so listing the bundle's
+# libraries here displaced the host's. HCE2's /usr/bin/ssh loaded AlmaLinux's
+# libcrypto.so.1.1 in place of the vendor build it was linked against and died
+# on a missing EVP_sm4_ctr, failing simpler's build.
 #
-# gcc/lib64 stays FIRST and is not a fallback: ptoas needs GLIBCXX_3.4.29 and
-# the host libstdc++ stops at 3.4.28, so the bundle's copy has to win there.
-export LD_LIBRARY_PATH="$PYPTO_TOOLCHAIN/gcc/lib64:$PYPTO_TOOLCHAIN/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:$PYPTO_TOOLCHAIN/lib/bundled"
+# Those libraries are reached by RPATH instead: Python and ccache are linked
+# with one at build time, which binds only the binary that declares it and
+# cannot leak into anything they invoke. That is what RPATH is for.
+#
+# gcc/lib64 stays, and displacing is the point there: ptoas needs
+# GLIBCXX_3.4.29 and the host libstdc++ stops at 3.4.28.
+export LD_LIBRARY_PATH="$PYPTO_TOOLCHAIN/gcc/lib64:$PYPTO_TOOLCHAIN/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 PREFIX_EOF
 
 # Substitute the placeholder with the real prefix. Done after the fact so the

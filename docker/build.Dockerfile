@@ -161,6 +161,8 @@ RUN curl -fsSL --retry 5 \
         -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
         -DREDIS_STORAGE_BACKEND=OFF \
         -DENABLE_TESTING=OFF \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+        -DCMAKE_INSTALL_RPATH="${PREFIX}/lib/bundled" \
     && cmake --build ccache-build -j"$(nproc)" \
     && cmake --install ccache-build --strip \
     && cd /build && rm -rf ccache-${CCACHE_VERSION} ccache-build
