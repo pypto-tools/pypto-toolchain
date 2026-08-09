@@ -52,6 +52,7 @@ ARG GCC_VERSION=15.2.0
 ARG PYTHON_VERSION=3.10.18
 ARG UV_VERSION=0.9.28
 ARG CCACHE_VERSION=4.10.2
+ARG PATCHELF_VERSION=0.18.0
 
 # Source mirrors. Default to upstream; scripts/build.sh overrides them with the
 # domestic mirrors when building from inside the corporate network.
@@ -71,14 +72,6 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # lives in the PowerTools/CRB repo, whose name and default-enabled state differ
 # between AlmaLinux, Rocky and RHEL. GCC ships contrib/download_prerequisites
 # for exactly this, so the build stays self-contained and base-image-agnostic.
-# patchelf is not in the EL8 repositories, and the $ORIGIN-relative RPATHs it
-# writes are what let the bundle resolve its own libraries with nothing set in
-# the environment. A toolchain that only works once LD_LIBRARY_PATH is right is
-# precisely the fragility this bundle exists to remove. The PyPI package ships
-# a prebuilt binary for both architectures, which is less brittle than enabling
-# EPEL — that repository's name and default state differ across RHEL 8 rebuilds.
-RUN python3 -m pip install --no-cache-dir patchelf && patchelf --version
-
 RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
         gcc gcc-c++ make cmake git \
         zlib-devel bzip2-devel xz-devel libffi-devel openssl-devel libzstd-devel \
@@ -103,6 +96,20 @@ RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
 # a repo whose name and default-enabled state vary between AlmaLinux, Rocky and
 # RHEL — enabling it would reintroduce exactly the base-image coupling that
 # download_prerequisites was chosen to avoid.
+
+# patchelf is absent from the EL8 repositories, yet the $ORIGIN-relative RPATHs
+# it writes are what let the bundle resolve its own libraries with nothing set
+# in the environment — a toolchain that only works once LD_LIBRARY_PATH is right
+# is precisely the fragility this bundle exists to remove.
+#
+# Its own release tarball, not pip: this image has no python3 at all (dnf runs
+# on a private platform-python), and EL8's pip is too old to install the wheel
+# even after adding one. Not EPEL either, whose name and default-enabled state
+# differ across RHEL 8 rebuilds.
+RUN curl -fsSL --retry 5 \
+      "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-$(uname -m).tar.gz" \
+    | tar xz -C /usr/local ./bin/patchelf \
+    && patchelf --version
 
 WORKDIR /build
 
