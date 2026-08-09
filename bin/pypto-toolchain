@@ -57,7 +57,10 @@ load_conf
 # specs alike; `sort -V` handles 3.4.9 < 3.4.29, which a string compare does not.
 version_ge() { [ "$1" = "$2" ] || [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -1)" = "$1" ]; }
 
-host_glibc() { ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$'; }
+# sed, not `head -1`: head exits early, ldd takes SIGPIPE on its next write, and
+# under `pipefail` the capture yields 141 and an empty string — reported here as
+# "could not detect glibc" on a host that is perfectly fine.
+host_glibc() { ldd --version 2>/dev/null | sed -n '1s/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p'; }
 
 manifest_env() {
     local version="$1" f="$APP_DIR/manifest/$1.env"

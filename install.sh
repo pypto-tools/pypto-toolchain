@@ -21,6 +21,12 @@
 
 set -euo pipefail
 
+# Anything that aborts before the first echo would otherwise leave the user
+# staring at a silent prompt — which is exactly how the glibc probe below failed
+# once, and indistinguishable from "curl fetched nothing" when this script is
+# piped into bash.
+trap 'rc=$?; [ $rc -ne 0 ] && echo "install.sh: failed at line $LINENO (exit $rc)" >&2' EXIT
+
 REPO_URL="${PYPTO_TOOLCHAIN_REPO:-https://github.com/pypto-tools/pypto-toolchain.git}"
 # Everything this tool owns lives under one prefix: the CLI checkout, the
 # bundles and the download cache. Uninstalling is then `rm -rf /opt/pypto` plus
@@ -49,8 +55,17 @@ die() { echo "error: $*" >&2; exit 1; }
 # leaving a CLI that fails at every invocation. 2.28 is the floor the bundles
 # are built against; ptoas separately needs 2.34, so this is the looser of the
 # two checks and `verify` will surface the rest.
-glibc="$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
-if [ "$(printf '2.28\n%s\n' "$glibc" | sort -V | head -1)" != "2.28" ]; then
+# sed rather than `head -1`: head exits after the first line, ldd is killed by
+# SIGPIPE on its next write, and under `set -o pipefail` that 141 propagates to
+# this assignment and `set -e` terminates the script — before a single line of
+# output, so the failure looks like nothing happened at all. sed without `q`
+# consumes all of the input.
+glibc="$(ldd --version | sed -n '1s/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"
+[ -n "$glibc" ] || die "could not determine this host's glibc version from 'ldd --version'"
+# `tail -1` of a version sort: tail reads its input to the end, so no writer in
+# the pipeline is ever signalled.
+if [ "$glibc" != "2.28" ] && \
+   [ "$(printf '2.28\n%s\n' "$glibc" | sort -V | tail -1)" != "$glibc" ]; then
     die "glibc $glibc is below the 2.28 floor; this host cannot run pypto-toolchain bundles"
 fi
 case "$(uname -m)" in

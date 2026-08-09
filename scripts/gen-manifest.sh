@@ -105,7 +105,7 @@ GCC_VERSION $("$PREFIX/gcc/bin/g++-15" -dumpversion)
 GCC_TARGET $("$PREFIX/gcc/bin/g++-15" -dumpmachine)
 GLIBCXX_MAX $(glibcxx_max)
 PYTHON_VERSION $("$PREFIX/python/bin/python3.10" -c 'import platform;print(platform.python_version())')
-CCACHE_VERSION $("$PREFIX/bin/ccache" --version | head -1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?')
+CCACHE_VERSION $("$PREFIX/bin/ccache" --version | sed -n '1s/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\?\).*/\1/p')
 UV_VERSION $("$PREFIX/bin/uv" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 $(checksums)
 EOF
