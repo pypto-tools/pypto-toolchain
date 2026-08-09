@@ -175,12 +175,38 @@ note: $BASE_IMAGE is not present locally, so dockerd has to fetch it.
 EOF
 fi
 
+# Layer caching. A GitHub runner is a fresh VM every time, so without an
+# external cache backend every run recompiles GCC and Python from scratch —
+# roughly two hours — even when the change was three lines in a shell script
+# that runs after both. The expensive layers sit early and are stable, so a
+# cache turns those runs into minutes.
+#
+# Off unless PYPTO_BUILD_CACHE is set: it needs the docker-container driver
+# (the default docker driver cannot export cache), and a developer building
+# locally should not have to care.
+# Subcommand and cache flags, appended to $DOCKER (which is "docker" or
+# "sudo docker" depending on socket access).
+BUILD_SUBCMD=(build)
+if [ -n "${PYPTO_BUILD_CACHE:-}" ]; then
+    if ! "${DOCKER[@]}" buildx version >/dev/null 2>&1; then
+        echo "::warning::PYPTO_BUILD_CACHE is set but buildx is unavailable; building without cache"
+    else
+        # --load puts the result in the local image store, which the export step
+        # below needs; scope keeps the two architectures from evicting one
+        # another, since they share one cache namespace.
+        BUILD_SUBCMD=(buildx build --load
+                      --cache-from "type=${PYPTO_BUILD_CACHE},scope=${ARCH}"
+                      --cache-to   "type=${PYPTO_BUILD_CACHE},mode=max,scope=${ARCH}")
+    fi
+fi
+
 echo "==> building $IMAGE"
 echo "    prefix  $PREFIX"
 echo "    base    $BASE_IMAGE"
 echo "    mirrors $MIRROR_SET"
+echo "    cache   ${PYPTO_BUILD_CACHE:-none}"
 
-"${DOCKER[@]}" build \
+"${DOCKER[@]}" "${BUILD_SUBCMD[@]}" \
     -f docker/build.Dockerfile \
     "${BUILD_NETWORK_ARGS[@]+"${BUILD_NETWORK_ARGS[@]}"}" \
     "${BUILD_PROXY_ARGS[@]+"${BUILD_PROXY_ARGS[@]}"}" \
