@@ -119,13 +119,18 @@ preflight() {
 # checked against the same pinned sha256, so where the archive came from is a
 # deployment detail rather than a trust boundary — a colleague's scp and a
 # release download are equally safe.
+# Everything this function reports goes to stderr, and ONLY the resolved path
+# goes to stdout: the caller reads it through a command substitution, which
+# captures stdout whole. Printing progress there would both hide it from the
+# user during a 200 MB download and splice it into the filename the caller then
+# hands to tar.
 fetch_bundle() {
     local version="$1" arch="$2" sha="$3"
     local name="pypto-toolchain-${version}-${arch}.tar.gz"
     local dest="$CACHE_DIR/$name" tmp
 
     if [ -f "$dest" ] && echo "$sha  $dest" | sha256sum -c - >/dev/null 2>&1; then
-        info "  cache hit: $dest"
+        info "  cache hit: $dest" >&2
         printf '%s' "$dest"; return 0
     fi
 
@@ -137,14 +142,18 @@ fetch_bundle() {
     local url
     for url in ${PYPTO_TOOLCHAIN_MIRROR:+"$PYPTO_TOOLCHAIN_MIRROR/$name"} \
                "$RELEASE_BASE/$version/$name"; do
-        info "  fetching $url"
-        if curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 "$url" -o "$tmp"; then
+        info "  fetching $url" >&2
+        # --progress-bar rather than -s: this is ~200 MB over a link that is
+        # often slow, and a silent minutes-long pause is indistinguishable from
+        # a hang. No --retry-all-errors either — it only exists from curl 7.71,
+        # and older curl treats an unknown option as a hard error.
+        if curl -fL --progress-bar --retry 3 --connect-timeout 15 "$url" -o "$tmp"; then
             if echo "$sha  $tmp" | sha256sum -c - >/dev/null 2>&1; then
                 mv -f "$tmp" "$dest"
                 trap - EXIT
                 printf '%s' "$dest"; return 0
             fi
-            info "  ${YELLOW}sha256 mismatch from this source, trying next${RESET}"
+            info "  ${YELLOW}sha256 mismatch from this source, trying next${RESET}" >&2
         fi
     done
     rm -f "$tmp"; trap - EXIT
