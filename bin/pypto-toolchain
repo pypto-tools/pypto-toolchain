@@ -548,10 +548,99 @@ cmd_export() {
     true
 }
 
+# Host readiness, WITHOUT a bundle installed. This is what to run on a machine
+# before deploying anything: it reports the facts that differ per host and that
+# a rollout has to account for, rather than assuming them.
+#
+# Everything here is read-only.
+cmd_doctor() {
+    local floor="2.28" newest
+    newest="$(ls "$APP_DIR"/manifest/*.env 2>/dev/null | sed 's|.*/||;s|\.env$||' | sort -V | tail -1)"
+    if [ -n "$newest" ]; then
+        floor="$(grep -E '^GLIBC_FLOOR=' "$APP_DIR/manifest/$newest.env" | cut -d= -f2)"
+        info "against pypto-toolchain ${newest}"
+    fi
+    info "host $(hostname)  $(uname -m)  $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
+
+    preflight "$floor" "$(uname -m)"
+
+    # The bundle ships a compiler, not a C library; these come from the machine.
+    local crt=""
+    if command -v gcc >/dev/null 2>&1; then crt="$(gcc -print-file-name=crt1.o 2>/dev/null)"; fi
+    [ -e "$crt" ] || crt="$(ls /usr/lib64/crt1.o /usr/lib/*/crt1.o 2>/dev/null | head -1)"
+    if [ -n "$crt" ] && [ -e "$crt" ] && command -v as >/dev/null 2>&1 && command -v ld >/dev/null 2>&1; then
+        ok "binutils + C runtime"
+    else
+        bad "binutils + C runtime" "dnf install binutils glibc-devel"
+    fi
+
+    # ccache is the one host tool the bundle replaces that CI silently depends
+    # on: below 4.8 it ignores CCACHE_NAMESPACE, which is how the pto-isa cache
+    # is scoped. Report where the working one comes from, because if it is
+    # conda's it disappears the moment conda does.
+    if command -v ccache >/dev/null 2>&1; then
+        local cc_path cc_ver
+        cc_path="$(command -v ccache)"; cc_ver="$(ccache --version | sed -n '1s/[^0-9]*\([0-9][0-9.]*\).*/\1/p')"
+        if CCACHE_NAMESPACE=probe ccache -p 2>/dev/null | grep -qi namespace; then
+            ok "ccache $cc_ver honours CCACHE_NAMESPACE"
+        else
+            warn "ccache $cc_ver ignores CCACHE_NAMESPACE" "the bundle supplies 4.10; until then pto-isa cache scoping is a no-op here"
+        fi
+        info "      ${DIM}$cc_path${RESET}"
+    else
+        warn "no ccache on PATH" "the bundle supplies one"
+    fi
+
+    local cann
+    cann="$(detect_cann)"
+    if [ -n "$cann" ]; then
+        ok "CANN $(cann_version "$cann")"
+        info "      ${DIM}$cann${RESET}"
+    else
+        warn "no CANN" "device jobs cannot run here; simulator and codegen jobs can"
+    fi
+
+    # conda is not a fault, but which envs carry pypto is: with the venvs those
+    # CI jobs build on --system-site-packages, a failed install in the venv is
+    # masked by the copy in the base env.
+    local conda_root="${CONDA_ROOT:-$HOME/miniconda3}" e n
+    if [ -d "$conda_root/envs" ]; then
+        for e in "$conda_root"/envs/*/; do
+            [ -x "$e/bin/python" ] || continue
+            n="$(basename "$e")"
+            if "$e/bin/python" -c 'import pypto' 2>/dev/null; then
+                warn "conda env '$n' has pypto installed" "with --system-site-packages it can shadow a venv build; removed by the migration"
+            fi
+        done
+        info "conda at $conda_root ($(ls -1 "$conda_root/envs" | wc -l) envs)"
+    else
+        info "no conda under $conda_root"
+    fi
+
+    # Where the 200 MB would land, and whether this host can fetch it at all.
+    info "storage $(dirname "$TOOLCHAIN_ROOT") -> $(readlink -f "$(dirname "$TOOLCHAIN_ROOT")" 2>/dev/null || echo '<absent>')"
+    # Redact userinfo: a proxy URL routinely carries user:password, and this
+    # report is meant to be pasted into a ticket or a chat window.
+    local px="${https_proxy:-${HTTPS_PROXY:-}}"
+    [ -n "$px" ] && info "proxy $(printf '%s' "$px" | sed 's|//[^/@]*@|//***:***@|')"
+    if curl -fsS -o /dev/null --connect-timeout 15 --max-time 30 \
+         "$RELEASE_BASE/../../releases" 2>/dev/null; then
+        ok "github reachable"
+    else
+        warn "github not reachable" "sideload into $CACHE_DIR, or set PYPTO_TOOLCHAIN_MIRROR"
+    fi
+
+    echo
+    [ "$FAILURES" -eq 0 ] && printf '%s✅ ready to install%s\n' "$GREEN" "$RESET" \
+                          || printf '%s❌ %d blocking issue(s)%s\n' "$RED" "$FAILURES" "$RESET"
+    return $(( FAILURES > 0 ))
+}
+
 usage() {
     cat <<'EOF'
 pypto-toolchain — deploy and verify PyPTO toolchain bundles
 
+  doctor                          host readiness, before any bundle is installed
   install <version> [--force]     download, preflight, unpack, verify
   use <version>                   point `current` at an installed version
   verify [--version V] [--require SPEC]...
@@ -570,6 +659,7 @@ EOF
 }
 
 case "${1:-}" in
+    doctor)  shift; cmd_doctor "$@" ;;
     install) shift; cmd_install "$@" ;;
     use)     shift; cmd_use "$@" ;;
     verify)  shift; cmd_verify "$@" ;;
