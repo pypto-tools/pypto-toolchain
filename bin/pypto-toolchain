@@ -170,6 +170,13 @@ fetch_bundle() {
     for url in ${PYPTO_TOOLCHAIN_MIRROR:+"$PYPTO_TOOLCHAIN_MIRROR/$name"} \
                "$RELEASE_BASE/$version/$name"; do
         info "  fetching $url" >&2
+        # curl picks these up on its own; report it so a download that goes an
+        # unexpected route is visible. Note sudo clears the environment, so a
+        # proxy exported in the caller's shell only survives via `sudo -E`, an
+        # inline `sudo https_proxy=... cmd`, or an `export` in pypto-env.conf,
+        # which this script sources itself.
+        [ -n "${https_proxy:-${HTTPS_PROXY:-}}" ] \
+            && info "  via proxy ${https_proxy:-$HTTPS_PROXY}" >&2
         # Progress is measured off the growing temp file rather than taken from
         # curl. --progress-bar cannot cope with this download: -L means the
         # redirect leg carries no Content-Length, so curl paints its unknown-size
