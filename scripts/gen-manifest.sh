@@ -72,6 +72,12 @@ checksums() {
     done
 }
 
+# Version fields are read with a leading `[^0-9]*`, which cannot cross a digit
+# and so stops at the first one. A leading `.*` looks equivalent but is greedy:
+# against "ccache version 4.10.2" it swallowed "4." and reported 10.2 — and a
+# 3.7.12 would have become 7.12, sailing past the `--require ccache>=4.8` guard
+# that exists precisely to catch it.
+
 # Highest GLIBCXX the bundled libstdc++ provides. ptoas needs GLIBCXX_3.4.29 and
 # the HCE2 system libstdc++ tops out at 3.4.28, so this value is the whole
 # reason the bundle carries a libstdc++ at all — assert it rather than trust it.
@@ -105,7 +111,7 @@ GCC_VERSION $("$PREFIX/gcc/bin/g++-15" -dumpversion)
 GCC_TARGET $("$PREFIX/gcc/bin/g++-15" -dumpmachine)
 GLIBCXX_MAX $(glibcxx_max)
 PYTHON_VERSION $("$PREFIX/python/bin/python3.10" -c 'import platform;print(platform.python_version())')
-CCACHE_VERSION $("$PREFIX/bin/ccache" --version | sed -n '1s/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\?\).*/\1/p')
+CCACHE_VERSION $("$PREFIX/bin/ccache" --version | sed -n '1s/[^0-9]*\([0-9][0-9.]*\).*/\1/p')
 UV_VERSION $("$PREFIX/bin/uv" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 $(checksums)
 EOF

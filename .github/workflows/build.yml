@@ -148,10 +148,13 @@ jobs:
           done
           [ "$status" -eq 0 ] || exit 1
 
-          # Shared keys from either file, plus one sha per architecture.
+          # Shared keys from either file, then the per-architecture ones from
+          # both. BUNDLE_SIZE_ has to be listed here alongside BUNDLE_SHA256_:
+          # taking only the sha left the merged manifest with the aarch64 size
+          # and no x86_64 size, so an x86 install showed no download percentage.
           mkdir -p manifest
-          grep -vE '^BUNDLE_SHA256_' "$a" > "manifest/$VERSION.env"
-          grep -hE '^BUNDLE_SHA256_' "$a" "$x" | sort >> "manifest/$VERSION.env"
+          grep -vE '^BUNDLE_(SHA256|SIZE)_' "$a" > "manifest/$VERSION.env"
+          grep -hE '^BUNDLE_(SHA256|SIZE)_' "$a" "$x" | sort >> "manifest/$VERSION.env"
           echo "--- manifest/$VERSION.env"
           cat "manifest/$VERSION.env"
 
@@ -210,8 +213,14 @@ jobs:
             exit 0
           fi
           git commit -m "chore: manifest for $VERSION"
-          if ! git push; then
-            echo "::warning::Could not push the manifest (branch protection?). It is"
-            echo "attached to the release — commit manifest/$VERSION.env by hand,"
-            echo "or hosts will not be able to resolve this version."
-          fi
+          # A two-hour build gives main plenty of time to move on, and the push
+          # is then rejected as non-fast-forward — which is what happened for
+          # 2026.08.2. Rebase and retry before giving up.
+          for attempt in 1 2 3; do
+            if git push; then exit 0; fi
+            echo "push rejected (attempt $attempt); rebasing onto origin/main"
+            git fetch origin main && git rebase origin/main || break
+          done
+          echo "::warning::Could not push the manifest. It is attached to the"
+          echo "release — commit manifest/$VERSION.env by hand, or hosts will"
+          echo "not be able to resolve this version."
