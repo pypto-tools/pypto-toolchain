@@ -1,0 +1,149 @@
+name: Verify bundle
+
+# Installs a published bundle the way a real host does and exercises it.
+#
+# The runners are the point. A GitHub runner is Ubuntu 24.04 — glibc 2.39,
+# libffi.so.8, OpenSSL 3 — while the bundle is built inside AlmaLinux 8 with
+# glibc 2.28, libffi.so.6 and OpenSSL 1.1. That mismatch is exactly the one that
+# shipped a bundle whose Python could not `import ctypes` on a fleet machine, so
+# a foreign OS is a better test bed here than a machine resembling the build
+# image. It also costs no self-hosted capacity.
+#
+# What this does NOT cover: an NPU, CANN, or the fleet's own kernel. Those need a
+# self-hosted runner and are checked by installing on a real host.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Bundle version to verify, e.g. 2026.08.3'
+        required: true
+        type: string
+  push:
+    branches: [main]
+    # The CLI is what decides whether a host is compliant, so a change to it is
+    # verified against the current bundle rather than taken on trust.
+    paths:
+      - 'bin/pypto-toolchain'
+      - 'install.sh'
+      - '.github/workflows/verify.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.event.release.tag_name || inputs.version || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          version="${{ github.event.release.tag_name || inputs.version }}"
+          if [ -z "$version" ]; then
+            # A push to main verifies against the newest committed manifest,
+            # which is the version the fleet is expected to be running.
+            version="$(ls manifest/*.env | sed 's|manifest/||;s|\.env$||' | sort -V | tail -1)"
+          fi
+          [ -n "$version" ] || { echo "::error::no version to verify"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "verifying $version on $(uname -m) / $(. /etc/os-release && echo "$PRETTY_NAME") / glibc $(ldd --version | head -1)"
+
+      - name: Install the CLI
+        # Clone from the checkout rather than from GitHub, so the CLI under test
+        # is this revision and not whatever main happens to hold.
+        env:
+          PYPTO_TOOLCHAIN_REPO: ${{ github.workspace }}
+        run: sudo -E bash install.sh
+
+      - name: Install and select the bundle
+        run: |
+          sudo pypto-toolchain install "${{ steps.v.outputs.version }}"
+          sudo pypto-toolchain use     "${{ steps.v.outputs.version }}"
+
+      - name: Verify
+        # The same capability assertions the PyPTO repositories make, so a bundle
+        # that would fail their CI fails here first.
+        run: |
+          pypto-toolchain verify \
+            --require python=3.10 \
+            --require 'gcc>=15' \
+            --require 'ccache>=4.8' \
+            --require 'uv>=0.5'
+
+      - name: Use it for real — venv, uv, a C++23 compile
+        # verify proves the pieces run. This proves they work together as a
+        # PyPTO build actually uses them: a venv from the bundle's Python, a
+        # package installed by the bundle's uv, and a translation unit that
+        # genuinely needs C++23 rather than merely being compiled with the flag.
+        run: |
+          set -euo pipefail
+          source /opt/pypto/toolchain/current/activate.sh
+
+          test "$(command -v python3.10)" = "$PYPTO_TOOLCHAIN/python/bin/python3.10"
+          test "$(command -v g++-15)"     = "$PYPTO_TOOLCHAIN/gcc/bin/g++-15"
+
+          python3.10 -m venv /tmp/probe-venv
+          . /tmp/probe-venv/bin/activate
+          uv pip install --python "$(command -v python)" 'packaging>=24'
+          python -c 'import packaging, ssl, ctypes, sqlite3; print("venv ok", packaging.__version__)'
+          deactivate
+
+          cat > /tmp/probe.cpp <<'CPP'
+          #include <expected>
+          #include <print>
+          // std::expected and std::print are C++23; a compiler that only accepts
+          // the flag without implementing the library would still fail here.
+          std::expected<int, const char*> half(int v) {
+              if (v % 2) return std::unexpected("odd");
+              return v / 2;
+          }
+          int main() { std::println("half(42) = {}", half(42).value()); return 0; }
+          CPP
+          g++-15 -std=c++23 /tmp/probe.cpp -o /tmp/probe
+          /tmp/probe
+
+          ccache --zero-stats >/dev/null
+          ccache g++-15 -std=c++23 -c /tmp/probe.cpp -o /tmp/probe.o
+          ccache --show-stats | head -5
+
+      - name: Run the toolchain with nothing in the environment
+        # The bundle carries $ORIGIN-relative RPATHs so its binaries resolve
+        # their own libraries unaided. Anything that starts one without entering
+        # the environment first — a build system spawning the compiler, or a
+        # task-submit child whose env snapshot was truncated — depends on this.
+        # env -i, so an inherited LD_LIBRARY_PATH cannot mask a regression.
+        run: |
+          set -euo pipefail
+          P="/opt/pypto/toolchain/current"
+          env -i PATH=/usr/bin:/bin "$P/python/bin/python3.10" \
+              -c 'import ctypes, ssl, sqlite3; print("bare python ok")'
+          echo 'int main(){}' > /tmp/bare.cpp
+          env -i PATH=/usr/bin:/bin "$P/gcc/bin/g++-15" -std=c++23 /tmp/bare.cpp -o /tmp/bare
+          echo "bare g++-15 ok"
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.arch }} — ${{ steps.v.outputs.version }}"
+            echo '```'
+            cat /opt/pypto/toolchain/current/MANIFEST 2>/dev/null || echo "no MANIFEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
