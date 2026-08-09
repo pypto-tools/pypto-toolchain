@@ -18,6 +18,14 @@ on:
         required: false
         type: boolean
         default: true
+      from_run:
+        description: >-
+          Publish the artifacts of an existing run instead of building. Use when
+          the build succeeded but publishing did not — rebuilding costs two
+          hours and would produce a different tarball for no reason.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -28,6 +36,7 @@ concurrency:
 
 jobs:
   build:
+    if: inputs.from_run == ''
     strategy:
       fail-fast: false
       matrix:
@@ -84,16 +93,24 @@ jobs:
 
   publish:
     needs: build
-    if: inputs.publish
+    # always(): `build` is skipped when republishing an existing run, and a
+    # skipped dependency would otherwise skip this job too.
+    if: >-
+      always() && inputs.publish
+      && (inputs.from_run != '' || needs.build.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Reading another run's artifacts needs this; same-run downloads do not.
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          run-id: ${{ inputs.from_run != '' && inputs.from_run || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Merge manifests and check the two architectures agree
         env:
@@ -133,6 +150,12 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          # Idempotent: a failed publish leaves the release created but empty,
+          # and a re-run must be able to finish the job rather than die on
+          # "release already exists".
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "release $VERSION already exists — updating its assets"
+          else
           gh release create "$VERSION" \
             --title "pypto-toolchain $VERSION" \
             --notes-file - <<EOF
@@ -150,9 +173,14 @@ jobs:
           pypto-toolchain verify
           \`\`\`
           EOF
-          gh release upload "$VERSION" \
-            artifacts/bundle-*/pypto-toolchain-*.tar.gz \
-            artifacts/bundle-*/pypto-toolchain-*.tar.gz.sha256 \
+          fi
+          # upload-artifact roots a multi-path artifact at the least common
+          # ancestor of those paths, so the tarballs arrive under dist/ and the
+          # manifest under manifest/ — the layout they had in the build tree.
+          # --clobber so a re-run replaces assets instead of erroring on them.
+          gh release upload "$VERSION" --clobber \
+            artifacts/bundle-*/dist/pypto-toolchain-*.tar.gz \
+            artifacts/bundle-*/dist/pypto-toolchain-*.tar.gz.sha256 \
             "manifest/$VERSION.env"
 
       - name: Commit the manifest
