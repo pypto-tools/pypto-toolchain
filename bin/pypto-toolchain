@@ -33,9 +33,13 @@ RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; DIM=$'\033[2m'; RESET=$'
 [ -t 1 ] || { RED=""; GREEN=""; YELLOW=""; DIM=""; RESET=""; }
 
 FAILURES=0
-ok()   { printf '  %s%-46s OK%s\n'   "$GREEN" "$1" "$RESET"; }
-bad()  { printf '  %s%-46s FAILED%s\n%s      %s%s\n' "$RED" "$1" "$RESET" "$DIM" "${2:-}" "$RESET"; FAILURES=$((FAILURES + 1)); }
-warn() { printf '  %s%-46s WARN%s\n%s      %s%s\n' "$YELLOW" "$1" "$RESET" "$DIM" "${2:-}" "$RESET"; }
+# %-46.46s pads AND truncates: a plain %-46s only pads, so a label carrying a
+# path or a version longer than the field pushed the status off the column and
+# broke the alignment of the whole report. Truncating keeps the status column
+# fixed whatever a host's paths look like.
+ok()   { printf '  %s%-46.46s OK%s\n'   "$GREEN" "$1" "$RESET"; }
+bad()  { printf '  %s%-46.46s FAILED%s\n%s      %s%s\n' "$RED" "$1" "$RESET" "$DIM" "${2:-}" "$RESET"; FAILURES=$((FAILURES + 1)); }
+warn() { printf '  %s%-46.46s WARN%s\n%s      %s%s\n' "$YELLOW" "$1" "$RESET" "$DIM" "${2:-}" "$RESET"; }
 info() { printf '%s\n' "$*"; }
 die()  { printf '%serror: %s%s\n' "$RED" "$*" "$RESET" >&2; exit 1; }
 
@@ -341,7 +345,7 @@ cmd_verify() {
     local built_prefix
     built_prefix="$(bundle_field "$prefix" BUNDLE_PREFIX)"
     if [ "$built_prefix" = "$prefix" ]; then
-        ok "prefix matches build ($prefix)"
+        ok "prefix matches build"
     else
         bad "prefix matches build" "built for '$built_prefix' but installed at '$prefix'"
     fi
@@ -384,9 +388,9 @@ cmd_verify() {
     if out="$(run_in_env "$prefix/python/bin/python3.10" \
                 -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip;print("ok")' 2>&1)" \
        && [ "$out" = "ok" ]; then
-        ok "python3.10 stdlib (ssl/ctypes/sqlite3/lzma/venv)"
+        ok "python3.10 stdlib imports"
     else
-        bad "python3.10 stdlib" "$out"
+        bad "python3.10 stdlib imports" "$out"
     fi
 
     local probe; probe="$(mktemp -u)"
