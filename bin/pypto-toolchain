@@ -119,6 +119,29 @@ preflight() {
 # checked against the same pinned sha256, so where the archive came from is a
 # deployment detail rather than a trust boundary — a colleague's scp and a
 # release download are equally safe.
+# Redraw one line with how much of $1 has arrived, until process $2 exits.
+# $3 is the expected total in bytes, or empty when it is not known.
+#
+# Only when stderr is a terminal: in CI, or under `| tee`, carriage returns turn
+# a log into an unreadable single line, so there the download is simply quiet.
+watch_download() {
+    local file="$1" pid="$2" total="${3:-}" have pct
+    [ -t 2 ] || return 0
+    while kill -0 "$pid" 2>/dev/null; do
+        have="$(stat -c %s "$file" 2>/dev/null || echo 0)"
+        if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null; then
+            pct=$(( have * 100 / total ))
+            printf '\r  %6d / %d MiB  %3d%%' \
+                   "$(( have / 1048576 ))" "$(( total / 1048576 ))" "$pct" >&2
+        else
+            printf '\r  %6d MiB' "$(( have / 1048576 ))" >&2
+        fi
+        sleep 2
+    done
+    # Blank the line so the summary that follows starts clean.
+    printf '\r%*s\r' 40 '' >&2
+}
+
 # Everything this function reports goes to stderr, and ONLY the resolved path
 # goes to stdout: the caller reads it through a command substitution, which
 # captures stdout whole. Printing progress there would both hide it from the
@@ -128,6 +151,10 @@ fetch_bundle() {
     local version="$1" arch="$2" sha="$3"
     local name="pypto-toolchain-${version}-${arch}.tar.gz"
     local dest="$CACHE_DIR/$name" tmp
+    # Optional: bundles built before this key existed simply show MiB with no
+    # percentage rather than failing.
+    local expect_bytes=""
+    eval "expect_bytes=\${BUNDLE_SIZE_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]'):-}"
 
     if [ -f "$dest" ] && echo "$sha  $dest" | sha256sum -c - >/dev/null 2>&1; then
         info "  cache hit: $dest" >&2
@@ -143,25 +170,28 @@ fetch_bundle() {
     for url in ${PYPTO_TOOLCHAIN_MIRROR:+"$PYPTO_TOOLCHAIN_MIRROR/$name"} \
                "$RELEASE_BASE/$version/$name"; do
         info "  fetching $url" >&2
-        info "  ~200 MB — several minutes on a slow link, no output until it finishes" >&2
-        # Not --progress-bar: with -L the redirect leg has no Content-Length, so
-        # curl draws its unknown-size bouncing indicator, then switches to the
-        # '#' bar once the real asset starts, and every retry repaints from
-        # scratch — the result is unreadable. -sS stays quiet but still prints
-        # errors, and -w gives one summary line at the end.
+        # Progress is measured off the growing temp file rather than taken from
+        # curl. --progress-bar cannot cope with this download: -L means the
+        # redirect leg carries no Content-Length, so curl paints its unknown-size
+        # bouncing indicator, switches to the '#' bar when the real asset starts,
+        # and repaints from scratch on every retry — a screenful of noise. Watching
+        # the file works the same on any curl and through any number of redirects.
         #
-        # curl's stdout carries only that -w text (the body goes to -o), and the
-        # caller reads this function's stdout as the archive path, so send it to
-        # stderr. %{stderr} in the format would be neater but needs curl 7.63.
+        # curl's own stdout carries only the -w summary (the body goes to -o), and
+        # the caller reads this function's stdout as the archive path, so all of it
+        # goes to stderr.
         #
         # No --retry-all-errors: it only exists from curl 7.71 and older curl
-        # treats an unknown option as a hard error. Generous timeouts because
-        # this link stalls rather than refuses; --speed-limit/--speed-time still
-        # abandons a transfer that has genuinely died.
-        if curl -fL -sS --retry 5 --retry-delay 5 \
-                --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
-                -w '  received %{size_download} bytes in %{time_total}s\n' \
-                "$url" -o "$tmp" >&2; then
+        # rejects an unknown option outright. Timeouts are generous because this
+        # link stalls rather than refuses; --speed-limit/--speed-time still gives
+        # up on a transfer that has genuinely died.
+        curl -fL -sS --retry 5 --retry-delay 5 \
+             --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+             -w '  received %{size_download} bytes in %{time_total}s\n' \
+             "$url" -o "$tmp" >&2 &
+        local curl_pid=$!
+        watch_download "$tmp" "$curl_pid" "$expect_bytes"
+        if wait "$curl_pid"; then
             if echo "$sha  $tmp" | sha256sum -c - >/dev/null 2>&1; then
                 mv -f "$tmp" "$dest"
                 trap - EXIT

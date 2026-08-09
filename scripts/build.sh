@@ -234,6 +234,9 @@ set_key PYTHON_VERSION    "$(read_manifest PYTHON_VERSION)"
 set_key CCACHE_VERSION    "$(read_manifest CCACHE_VERSION)"
 set_key UV_VERSION        "$(read_manifest UV_VERSION)"
 set_key "BUNDLE_SHA256_${ARCH_UPPER}" "$SHA256"
+# Lets `install` show a percentage while downloading. Optional by design: a
+# manifest without it just reports MiB received, so older versions keep working.
+set_key "BUNDLE_SIZE_${ARCH_UPPER}" "$(stat -c %s "$TARBALL")"
 
 cat <<EOF
 
