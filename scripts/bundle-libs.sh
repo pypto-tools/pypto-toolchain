@@ -91,26 +91,18 @@ for _ in 1 2 3 4 5; do
 done
 echo "== $prev libraries bundled"
 
-# Point every binary at the bundle's own library directories through an
-# $ORIGIN-relative RPATH, so the bundle resolves correctly with nothing set in
-# the environment. LD_LIBRARY_PATH from activate.sh would mostly do, but only
-# mostly: anything that runs a bundle binary without entering the environment
-# first — a verify probe, a build system spawning a compiler, a task-submit
-# child with a truncated env snapshot — would fail on a missing libffi while
-# the library sits right there in the bundle.
-if command -v patchelf >/dev/null 2>&1; then
-    echo "== setting \$ORIGIN-relative RPATHs"
-    while read -r f; do
-        dir="$(dirname "$f")"
-        rpath="\$ORIGIN/$(realpath -m --relative-to="$dir" "$PREFIX/gcc/lib64")"
-        rpath="$rpath:\$ORIGIN/$(realpath -m --relative-to="$dir" "$PREFIX/python/lib")"
-        rpath="$rpath:\$ORIGIN/$(realpath -m --relative-to="$dir" "$BUNDLED")"
-        # Non-ELF files and static archives are simply skipped.
-        patchelf --set-rpath "$rpath" "$f" 2>/dev/null || true
-    done < <(elf_files)
-else
-    echo "::warning::patchelf unavailable — the bundle will work only with activate.sh sourced"
-fi
+# Deliberately NOT rewriting RPATHs across the whole prefix. A pass that did
+# corrupted libpython3.10.so.1.0 on x86_64 — "ELF load command address/offset
+# not properly aligned" — because patchelf has to shift PT_LOAD segments to make
+# room, and gets that wrong on some layouts. The self-containment check below did
+# not notice: ldd still prints a sensible answer for a library the loader then
+# refuses. Rewriting every ELF in the bundle risks more than it buys.
+#
+# The two places an RPATH genuinely earns its keep are handled where they are
+# built instead: Python links with -Wl,-rpath pointing at python/lib and
+# lib/bundled, and GCC's driver gets an $ORIGIN-relative RPATH over its own bin
+# and libexec only. Everything else resolves through activate.sh, which is how
+# consumers enter the bundle anyway.
 
 # The guard. With only the bundle's own directories on the search path, nothing
 # may be missing and nothing may resolve back to the build image. If this passes,

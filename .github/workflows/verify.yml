@@ -144,20 +144,21 @@ jobs:
           ccache g++-15 -std=c++23 -c /tmp/probe.cpp -o /tmp/probe.o
           ccache --show-stats | head -5
 
-      - name: Run the toolchain with nothing in the environment
-        # The bundle carries $ORIGIN-relative RPATHs so its binaries resolve
-        # their own libraries unaided. Anything that starts one without entering
-        # the environment first — a build system spawning the compiler, or a
-        # task-submit child whose env snapshot was truncated — depends on this.
-        # env -i, so an inherited LD_LIBRARY_PATH cannot mask a regression.
+      - name: Run Python with nothing in the environment
+        # Python links with an RPATH covering python/lib and lib/bundled, so it
+        # starts without anything set — which a build system spawning it, or a
+        # task-submit child with a truncated env snapshot, relies on. env -i so
+        # an inherited LD_LIBRARY_PATH cannot mask a regression.
+        #
+        # g++ is NOT probed this way: its RPATH covers only the libstdc++ it
+        # needs itself, and the wider rewrite that would have covered everything
+        # corrupted libpython on x86_64. Compilers are reached through
+        # activate.sh, which is the documented way in.
         run: |
           set -euo pipefail
           P="/opt/pypto/toolchain/current"
           env -i PATH=/usr/bin:/bin "$P/python/bin/python3.10" \
               -c 'import ctypes, ssl, sqlite3; print("bare python ok")'
-          echo 'int main(){}' > /tmp/bare.cpp
-          env -i PATH=/usr/bin:/bin "$P/gcc/bin/g++-15" -std=c++23 /tmp/bare.cpp -o /tmp/bare
-          echo "bare g++-15 ok"
 
       - name: Report
         if: always()

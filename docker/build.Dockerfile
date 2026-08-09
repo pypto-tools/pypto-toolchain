@@ -169,7 +169,7 @@ RUN curl -fsSL --retry 5 \
         --enable-optimizations \
         --with-lto \
         --with-ensurepip=install \
-        LDFLAGS="-Wl,-rpath,${PREFIX}/python/lib" \
+        LDFLAGS="-Wl,-rpath,${PREFIX}/python/lib -Wl,-rpath,${PREFIX}/lib/bundled" \
     && make -j"$(nproc)" \
     && make install \
     && cd /build && rm -rf Python-${PYTHON_VERSION} \
