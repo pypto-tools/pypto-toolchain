@@ -147,7 +147,13 @@ fetch_bundle() {
         # often slow, and a silent minutes-long pause is indistinguishable from
         # a hang. No --retry-all-errors either — it only exists from curl 7.71,
         # and older curl treats an unknown option as a hard error.
-        if curl -fL --progress-bar --retry 3 --connect-timeout 15 "$url" -o "$tmp"; then
+        # Generous timeouts: these hosts reach GitHub over a link that stalls
+        # rather than refuses, and 15s was short enough to abort a download that
+        # was merely slow. --speed-limit/--speed-time still abandons a transfer
+        # that has genuinely died instead of hanging until the end of time.
+        if curl -fL --progress-bar --retry 5 --retry-delay 5 \
+                --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+                "$url" -o "$tmp"; then
             if echo "$sha  $tmp" | sha256sum -c - >/dev/null 2>&1; then
                 mv -f "$tmp" "$dest"
                 trap - EXIT
@@ -158,8 +164,18 @@ fetch_bundle() {
     done
     rm -f "$tmp"; trap - EXIT
     die "could not obtain a bundle matching sha256 $sha
-  Tried the mirror (PYPTO_TOOLCHAIN_MIRROR) and the GitHub release.
-  On a host with a poor link to github.com, set a mirror in /etc/pypto-env.conf:
+
+  Tried the mirror (PYPTO_TOOLCHAIN_MIRROR) and the GitHub release. Release
+  assets are served from objects.githubusercontent.com, which several hosts here
+  cannot reach even when raw.githubusercontent.com works.
+
+  Either drop the archive in by hand — the cache is checked first and the
+  sha256 is verified whatever the source, so any transport is equally safe:
+    scp $name <this-host>:/tmp/
+    sudo cp /tmp/$name $CACHE_DIR/
+    sudo pypto-toolchain install $version
+
+  or serve it from a host that can download it, in /etc/pypto-env.conf:
     PYPTO_TOOLCHAIN_MIRROR=http://<intranet-host>:8080/toolchain"
 }
 
