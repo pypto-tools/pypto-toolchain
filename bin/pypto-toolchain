@@ -143,17 +143,25 @@ fetch_bundle() {
     for url in ${PYPTO_TOOLCHAIN_MIRROR:+"$PYPTO_TOOLCHAIN_MIRROR/$name"} \
                "$RELEASE_BASE/$version/$name"; do
         info "  fetching $url" >&2
-        # --progress-bar rather than -s: this is ~200 MB over a link that is
-        # often slow, and a silent minutes-long pause is indistinguishable from
-        # a hang. No --retry-all-errors either — it only exists from curl 7.71,
-        # and older curl treats an unknown option as a hard error.
-        # Generous timeouts: these hosts reach GitHub over a link that stalls
-        # rather than refuses, and 15s was short enough to abort a download that
-        # was merely slow. --speed-limit/--speed-time still abandons a transfer
-        # that has genuinely died instead of hanging until the end of time.
-        if curl -fL --progress-bar --retry 5 --retry-delay 5 \
+        info "  ~200 MB — several minutes on a slow link, no output until it finishes" >&2
+        # Not --progress-bar: with -L the redirect leg has no Content-Length, so
+        # curl draws its unknown-size bouncing indicator, then switches to the
+        # '#' bar once the real asset starts, and every retry repaints from
+        # scratch — the result is unreadable. -sS stays quiet but still prints
+        # errors, and -w gives one summary line at the end.
+        #
+        # curl's stdout carries only that -w text (the body goes to -o), and the
+        # caller reads this function's stdout as the archive path, so send it to
+        # stderr. %{stderr} in the format would be neater but needs curl 7.63.
+        #
+        # No --retry-all-errors: it only exists from curl 7.71 and older curl
+        # treats an unknown option as a hard error. Generous timeouts because
+        # this link stalls rather than refuses; --speed-limit/--speed-time still
+        # abandons a transfer that has genuinely died.
+        if curl -fL -sS --retry 5 --retry-delay 5 \
                 --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
-                "$url" -o "$tmp"; then
+                -w '  received %{size_download} bytes in %{time_total}s\n' \
+                "$url" -o "$tmp" >&2; then
             if echo "$sha  $tmp" | sha256sum -c - >/dev/null 2>&1; then
                 mv -f "$tmp" "$dest"
                 trap - EXIT
