@@ -49,6 +49,40 @@ done
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# sudo clears the environment, so a proxy exported in the caller's shell never
+# reaches the git below. Read it from the same config file the CLI uses, which
+# survives sudo because this script sources it itself.
+for _conf in "${PYPTO_ENV_CONF:-}" /etc/pypto-env.conf; do
+    if [ -n "$_conf" ] && [ -f "$_conf" ]; then
+        # shellcheck disable=SC1090
+        . "$_conf"
+        echo "config: $_conf"
+        break
+    fi
+done
+
+# Fetching from github.com over these links fails in two recurring ways: HTTP/2
+# framing errors ("RPC failed; curl 16"), and transfers that stall rather than
+# fail. Pin HTTP/1.1, enlarge the buffer, let git abandon a dead transfer, and
+# retry with backoff — the same treatment PyPTO's own CI applies to its clones.
+GIT_OPTS=(-c http.version=HTTP/1.1
+          -c http.postBuffer=1048576000
+          -c http.lowSpeedLimit=1000
+          -c http.lowSpeedTime=60)
+[ -n "${https_proxy:-${HTTPS_PROXY:-}}" ] \
+    && GIT_OPTS+=(-c "http.proxy=${https_proxy:-$HTTPS_PROXY}") \
+    && echo "proxy: ${https_proxy:-$HTTPS_PROXY}"
+
+retry_git() {
+    local attempt=0
+    until git "${GIT_OPTS[@]}" "$@"; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -ge 4 ] && { echo "git $* failed after $attempt attempts" >&2; return 1; }
+        echo "  git attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+        sleep $((attempt * 5))
+    done
+}
+
 [ "$(id -u)" -eq 0 ] || die "must run as root (it writes to /usr/local/bin and /opt)"
 
 # Refuse early and legibly on a host that could never run a bundle, rather than
@@ -101,12 +135,12 @@ fi
 mkdir -p "$(dirname "$APP_DIR")"
 if [ -d "$APP_DIR/.git" ]; then
     echo "updating $APP_DIR"
-    git -C "$APP_DIR" fetch --depth=1 origin HEAD
+    retry_git -C "$APP_DIR" fetch --depth=1 origin HEAD || die "could not update $APP_DIR"
     git -C "$APP_DIR" reset --hard FETCH_HEAD
 else
     echo "cloning into $APP_DIR"
     rm -rf "$APP_DIR"
-    git clone --depth=1 "$REPO_URL" "$APP_DIR"
+    retry_git clone --depth=1 "$REPO_URL" "$APP_DIR" || die "could not clone $REPO_URL"
 fi
 chmod +x "$APP_DIR/bin/pypto-toolchain" "$APP_DIR/scripts/"*.sh
 ln -sfn "$APP_DIR/bin/pypto-toolchain" "$BIN_LINK"
