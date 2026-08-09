@@ -38,10 +38,17 @@ export PATH="$PYPTO_TOOLCHAIN/bin:$PYPTO_TOOLCHAIN/gcc/bin:$PYPTO_TOOLCHAIN/pyth
 # empty inherited value from leaving a trailing colon, which the dynamic loader
 # reads as "the current directory".
 # lib/bundled holds the non-glibc libraries copied out of the build image
-# (libffi, libssl, libsqlite3, ...). They are matched by SONAME, so a newer host
-# does not satisfy them — it simply lacks them, and importing ctypes or ssl
-# fails outright.
-export LD_LIBRARY_PATH="$PYPTO_TOOLCHAIN/gcc/lib64:$PYPTO_TOOLCHAIN/python/lib:$PYPTO_TOOLCHAIN/lib/bundled${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# (libffi, libssl, libsqlite3, ...) and goes LAST, so it is a fallback rather
+# than an override. Everything launched from this environment inherits
+# LD_LIBRARY_PATH, host programs included: with lib/bundled first, HCE2's
+# /usr/bin/ssh loaded AlmaLinux's libcrypto.so.1.1 in place of the vendor build
+# it was linked against and died on a missing EVP_sm4_ctr. A host that has a
+# library keeps its own; one that does not falls through to the bundle's, which
+# is all these copies were ever for.
+#
+# gcc/lib64 stays FIRST and is not a fallback: ptoas needs GLIBCXX_3.4.29 and
+# the host libstdc++ stops at 3.4.28, so the bundle's copy has to win there.
+export LD_LIBRARY_PATH="$PYPTO_TOOLCHAIN/gcc/lib64:$PYPTO_TOOLCHAIN/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:$PYPTO_TOOLCHAIN/lib/bundled"
 PREFIX_EOF
 
 # Substitute the placeholder with the real prefix. Done after the fact so the
