@@ -61,9 +61,13 @@ jobs:
         # the machine. Installing them here states that contract explicitly
         # rather than leaving it implied by whatever the runner happened to have.
         # git/curl/tar are for install.sh itself.
+        # curl is deliberately absent from this list: the image ships
+        # curl-minimal, which already provides the command and which the full
+        # curl package conflicts with, failing the whole transaction.
         run: |
           dnf install -y --setopt=tsflags=nodocs \
-              binutils glibc-devel git curl tar findutils diffutils
+              binutils glibc-devel git tar findutils diffutils
+          command -v curl git as ld
           echo "$(. /etc/os-release && echo "$PRETTY_NAME")  glibc $(ldd --version | head -1 | grep -oE '[0-9.]+$')"
 
       - uses: actions/checkout@v4
