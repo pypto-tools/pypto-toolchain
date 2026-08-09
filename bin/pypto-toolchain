@@ -372,8 +372,17 @@ cmd_verify() {
     fi
 
     # --- smoke tests: prove it runs, not merely that the bytes are right ---
+    #
+    # Run through activate.sh, because that is how every consumer enters the
+    # bundle. The libraries it carries (libffi, libssl, ...) are found via
+    # LD_LIBRARY_PATH, so invoking the binaries bare tests a configuration
+    # nobody uses — and reports a missing libffi even when the bundle contains
+    # it. This also makes activate.sh itself part of what is verified.
+    run_in_env() { ( . "$prefix/activate.sh"; "$@" ); }
+
     local out
-    if out="$("$prefix/python/bin/python3.10" -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip;print("ok")' 2>&1)" \
+    if out="$(run_in_env "$prefix/python/bin/python3.10" \
+                -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip;print("ok")' 2>&1)" \
        && [ "$out" = "ok" ]; then
         ok "python3.10 stdlib (ssl/ctypes/sqlite3/lzma/venv)"
     else
@@ -381,22 +390,23 @@ cmd_verify() {
     fi
 
     local probe; probe="$(mktemp -u)"
-    if out="$(echo 'int main(){return 0;}' | "$prefix/gcc/bin/g++-15" -std=c++23 -x c++ - -o "$probe" 2>&1)" \
-       && "$probe"; then
+    if out="$(echo 'int main(){return 0;}' \
+                | run_in_env "$prefix/gcc/bin/g++-15" -std=c++23 -x c++ - -o "$probe" 2>&1)" \
+       && run_in_env "$probe"; then
         ok "g++-15 compiles and links -std=c++23"
     else
         bad "g++-15 compiles and links -std=c++23" "$out"
     fi
     rm -f "$probe"
 
-    if CCACHE_NAMESPACE=probe "$prefix/bin/ccache" -p 2>/dev/null | grep -qi namespace; then
+    if CCACHE_NAMESPACE=probe run_in_env "$prefix/bin/ccache" -p 2>/dev/null | grep -qi namespace; then
         ok "ccache honours CCACHE_NAMESPACE"
     else
         bad "ccache honours CCACHE_NAMESPACE" \
             "this ccache ignores it silently, which would let a pto-isa bump reuse objects built against the old ISA"
     fi
 
-    if out="$("$prefix/bin/uv" --version 2>&1)"; then ok "uv ($out)"; else bad "uv" "$out"; fi
+    if out="$(run_in_env "$prefix/bin/uv" --version 2>&1)"; then ok "uv ($out)"; else bad "uv" "$out"; fi
 
     # ptoas lives outside the bundle (pinned per project, fetched per job), so
     # this is opportunistic: if the host happens to have one, prove the bundle's
@@ -405,7 +415,9 @@ cmd_verify() {
     local ptoas
     ptoas="$(command -v ptoas 2>/dev/null)"
     if [ -n "$ptoas" ]; then
-        if env -i PATH=/usr/bin:/bin LD_LIBRARY_PATH="$prefix/gcc/lib64" "$ptoas" --version >/dev/null 2>&1; then
+        if env -i PATH=/usr/bin:/bin \
+               LD_LIBRARY_PATH="$prefix/gcc/lib64:$prefix/lib/bundled" \
+               "$ptoas" --version >/dev/null 2>&1; then
             ok "ptoas loads against the bundle's libstdc++"
         else
             bad "ptoas loads against the bundle's libstdc++" "$ptoas failed to start under env -i"

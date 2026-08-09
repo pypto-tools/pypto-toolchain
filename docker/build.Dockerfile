@@ -71,6 +71,14 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # lives in the PowerTools/CRB repo, whose name and default-enabled state differ
 # between AlmaLinux, Rocky and RHEL. GCC ships contrib/download_prerequisites
 # for exactly this, so the build stays self-contained and base-image-agnostic.
+# patchelf is not in the EL8 repositories, and the $ORIGIN-relative RPATHs it
+# writes are what let the bundle resolve its own libraries with nothing set in
+# the environment. A toolchain that only works once LD_LIBRARY_PATH is right is
+# precisely the fragility this bundle exists to remove. The PyPI package ships
+# a prebuilt binary for both architectures, which is less brittle than enabling
+# EPEL — that repository's name and default state differ across RHEL 8 rebuilds.
+RUN python3 -m pip install --no-cache-dir patchelf && patchelf --version
+
 RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False \
         gcc gcc-c++ make cmake git \
         zlib-devel bzip2-devel xz-devel libffi-devel openssl-devel libzstd-devel \
@@ -128,8 +136,8 @@ RUN curl -fsSL --retry 5 \
 # libstdc++ the bootstrap just built. activate.sh already puts gcc/lib64 on
 # LD_LIBRARY_PATH, so this is belt-and-braces: an $ORIGIN-relative RPATH lets
 # them resolve it even when invoked from an environment nobody activated.
-# Best-effort — patchelf ships with the manylinux images but is not worth
-# failing a two-hour build over, and the LD_LIBRARY_PATH path still works.
+# bundle-libs.sh re-applies RPATHs across the whole prefix later; this early
+# pass just keeps the GCC that follows usable inside the build itself.
 #
 # $ORIGIN is single-quoted so the shell passes it through literally; it is
 # resolved by the dynamic loader at run time, not here.

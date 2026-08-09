@@ -82,6 +82,27 @@ for _ in 1 2 3 4 5; do
 done
 echo "== $prev libraries bundled"
 
+# Point every binary at the bundle's own library directories through an
+# $ORIGIN-relative RPATH, so the bundle resolves correctly with nothing set in
+# the environment. LD_LIBRARY_PATH from activate.sh would mostly do, but only
+# mostly: anything that runs a bundle binary without entering the environment
+# first — a verify probe, a build system spawning a compiler, a task-submit
+# child with a truncated env snapshot — would fail on a missing libffi while
+# the library sits right there in the bundle.
+if command -v patchelf >/dev/null 2>&1; then
+    echo "== setting \$ORIGIN-relative RPATHs"
+    while read -r f; do
+        dir="$(dirname "$f")"
+        rpath="\$ORIGIN/$(realpath -m --relative-to="$dir" "$PREFIX/gcc/lib64")"
+        rpath="$rpath:\$ORIGIN/$(realpath -m --relative-to="$dir" "$PREFIX/python/lib")"
+        rpath="$rpath:\$ORIGIN/$(realpath -m --relative-to="$dir" "$BUNDLED")"
+        # Non-ELF files and static archives are simply skipped.
+        patchelf --set-rpath "$rpath" "$f" 2>/dev/null || true
+    done < <(elf_files)
+else
+    echo "::warning::patchelf unavailable — the bundle will work only with activate.sh sourced"
+fi
+
 # The guard. With only the bundle's own directories on the search path, nothing
 # may be missing and nothing may resolve back to the build image. If this passes,
 # the same binaries resolve identically on any host at or above the glibc floor.
