@@ -78,6 +78,10 @@ installed, no system Python or GCC is replaced, `/etc` is untouched. Uninstall i
 `rm -rf` on one directory. A fleet can therefore be rolled out one machine at a
 time, with conda left in place until every consumer has migrated.
 
+[docs/deployment.md](docs/deployment.md) covers the rest: getting a proxy past
+`sudo`, choosing where the bundle lands, installing with no route to GitHub, and
+the errors that do not say what they mean.
+
 ## Use
 
 ```bash
