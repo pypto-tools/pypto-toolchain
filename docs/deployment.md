@@ -1,5 +1,7 @@
 # Deploying a bundle on a host
 
+English | [中文](deployment.zh.md)
+
 The README says what a bundle is and why it exists. This says how to get one
 onto a machine, and documents the places a deployment actually stalls — most of
 them proxy-related, none of them obvious from the error message.
