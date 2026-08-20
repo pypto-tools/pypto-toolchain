@@ -130,18 +130,26 @@ floor will never be the binding constraint.
 
 The bundle carries a compiler, not a C library. Two things come from the machine:
 
-| From the host | Why |
-| --- | --- |
-| `binutils` (`as`, `ld`) | GCC drives the system assembler and linker |
-| `glibc-devel` (`crt1.o`, `libc.so`) | the C runtime startup files every link needs |
+| From the host | RHEL family | Debian / Ubuntu |
+| --- | --- | --- |
+| `as`, `ld` — GCC drives the system assembler and linker | `binutils` | `binutils` |
+| `crt1.o`, `libc.so` — the C runtime startup files every link needs | `glibc-devel` | `libc6-dev` |
 
 `verify` checks for both, because their absence otherwise surfaces as
 `cannot find crt1.o` from the linker — which reads like a corrupt bundle rather
 than a missing package.
 
-**RHEL-family hosts only.** GCC resolves those files through library paths baked
-in at configure time, in the build image's layout (`/usr/lib64`). Debian and
-Ubuntu place them under a multiarch triplet directory instead, so linking fails
-there. Every machine in this fleet runs an RHEL derivative (HCE2, openEuler);
-supporting Debian would mean shipping a sysroot, which is a different and much
-larger artifact.
+**Debian and Ubuntu need one extra step, which `install` performs for you.** GCC
+resolves those files through library paths baked in at configure time, in the
+build image's layout (`/usr/lib64`); Debian and Ubuntu use a multiarch triplet
+directory (`/usr/lib/x86_64-linux-gnu`) instead. `install` detects this — by
+asking the compiler whether it can find `crt1.o`, not by reading
+`/etc/os-release` — and drops a specs file into GCC's own lib directory naming
+the multiarch paths. GCC loads it automatically, so nothing downstream needs a
+flag or an environment variable, and an RHEL host never receives one.
+
+Verified on Ubuntu 24.04 / glibc 2.39: `verify` passes every check, the bundle's
+own C++ headers still win over the host's, and linking CANN produces no glibc
+symbol-version conflict. The unsupported alternative is a sysroot, which would
+also bound the glibc version of everything the toolchain *produces* — see
+[docs/deployment.md](docs/deployment.md).

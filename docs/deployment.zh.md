@@ -14,21 +14,22 @@ bundle 几乎不依赖宿主机，但"几乎"不是"完全"：
 | aarch64 或 x86_64 | `install.sh`，下载前 | 只构建了这两个架构 |
 | glibc >= 2.28 | `install.sh`，下载前 | bundle 构建时的下限 |
 | `binutils`（`as`、`ld`） | `doctor`、`verify` | GCC 驱动的是系统汇编器和链接器 |
-| `glibc-devel`（`crt1.o`、`libc.so`） | `doctor`、`verify` | 每次链接都要的 C 运行时启动文件 |
-| RHEL 系目录布局 | 不检查——见文末 | GCC 的库搜索路径在 configure 时固化 |
+| `glibc-devel` / `libc6-dev`（`crt1.o`、`libc.so`） | `doctor`、`verify` | 每次链接都要的 C 运行时启动文件 |
+| multiarch 布局（如果是） | `install` 检测并自动适配 | GCC 的库搜索路径在 configure 时固化——见文末 |
 
 装任何东西之前，先手工预检：
 
 ```bash
 uname -m                          # aarch64 或 x86_64
 ldd --version | head -1           # >= 2.28
-cat /etc/os-release               # HCE2 / openEuler / AlmaLinux / Rocky
+cat /etc/os-release               # RHEL 系或 Debian 系，都支持
 command -v as ld                  # binutils
 gcc -print-file-name=crt1.o       # 要得到一个存在的绝对路径，而不是裸的 "crt1.o"
 ```
 
 最后一条和 `verify` 用的是同一个手法。GCC 找不到文件时会把裸文件名原样回显，所以
-只回显 `crt1.o` 表示"缺"，回显 `/usr/lib64/crt1.o` 表示包已经装了。
+只回显 `crt1.o` 表示"缺"，回显 `/usr/lib64/crt1.o`（Debian 和 Ubuntu 上是
+`/usr/lib/x86_64-linux-gnu/crt1.o`）表示包已经装了。
 
 在一台已经能构建 PyPTO 的机器上，这些通常本来就齐——**先查，再决定要不要动包管理器**。
 
@@ -213,7 +214,8 @@ sudo PYPTO_TOOLCHAIN_REPO=/path/to/pypto-toolchain bash /path/to/install.sh --st
 | `install` 卡住，没有进度 | 代理没能通过 `sudo` | `sudo env https_proxy=... <绝对路径> install <版本>` |
 | `sorry, you are not allowed to set the following environment variables` | 用了 `sudo VAR=value` 但没有 `SETENV` | 改用 `sudo env` |
 | `could not obtain a bundle matching sha256` | `objects.githubusercontent.com` 不可达 | 旁路塞进 cache，或设 `PYPTO_TOOLCHAIN_MIRROR` |
-| 链接器报 `cannot find crt1.o` | 缺 `glibc-devel`——或者这是台 Debian 系机器 | `dnf install glibc-devel`；Debian 见文末 |
+| 链接器报 `cannot find crt1.o` | 缺 C 运行时开发包 | `dnf install glibc-devel`，或 `apt install libc6-dev` |
+| Debian/Ubuntu 上已装 `libc6-dev` 仍报 `cannot find crt1.o` | multiarch specs 文件没写成，或被重装冲掉了 | `pypto-toolchain install <版本> --force` |
 | `verify` 的 `prefix matches build` 失败 | 解压位置不是 `/opt/pypto/toolchain/<版本>` | 重装；前缀是编译进去的，不能配置 |
 | `doctor` 报 `no conda under …` 但提示符是 `(base)` | 它查的是 `${CONDA_ROOT:-$HOME/miniconda3}` | `CONDA_ROOT="$(conda info --base)" pypto-toolchain doctor` |
 | `dnf` 在 repodata 上报 403 | 宿主机自己的软件源问题，与本工具无关 | `dnf clean all`；再不行换镜像源，或者预检已通过就直接跳过 |
@@ -221,37 +223,51 @@ sudo PYPTO_TOOLCHAIN_REPO=/path/to/pypto-toolchain bash /path/to/install.sh --st
 `doctor` 的 migration notes（`no ccache on PATH`、某个 conda 环境里装了 pypto）**从不
 阻塞安装**。它们描述的是这台机器今天所处的状态，迁移完成后会自动消失。
 
-## 不支持 Debian 和 Ubuntu
+## Debian 和 Ubuntu
 
-`install.sh` 不检查发行版，所以 Debian 系机器会装得很干净，然后在 `verify` 挂掉，
-报一条关于 `crt1.o` 的消息——**读起来像 bundle 损坏**。
+支持，`install` 会自动完成唯一需要的那一步适配。
 
-原因是布局。GCC 通过 configure 时固化的库搜索路径解析 `crt1.o` 及其同伴，用的是构建
-镜像的 RHEL 布局（`/usr/lib64`）；Debian 和 Ubuntu 用的是 multiarch 三元组目录
-（`/usr/lib/x86_64-linux-gnu`）。装 `libc6-dev` 能把文件放到磁盘上，但放不到编译器
-会看的地方。
+GCC 解析 `crt1.o` 和架构相关的 glibc 头文件，走的是 configure 时固化进去的搜索路径，
+也就是构建镜像的 RHEL 布局（`/usr/lib64`、`/usr/include`）；Debian 和 Ubuntu 用的是
+multiarch 三元组目录（`/usr/lib/x86_64-linux-gnu`）。装 `libc6-dev` 能把文件放到磁盘
+上，但放不到编译器会去找的地方，于是链接失败，报出来的 `crt1.o` 看着像 bundle 损坏。
 
-有两个绕法，**都不支持**：
+`install` 的做法是往 GCC 自己的 lib 目录里写一个 specs 文件：
 
-- 把构建放进 RHEL 系容器。这在同时要跑 device 或 HCCL 任务的机器上不成立——在 docker
-  里芯片子进程会在 `comm_init` 静默死亡。
-- 手工把 GCC 指向 multiarch 目录。**两侧都要补**——库那侧是为了 crt 文件，头文件那侧
-  是为了架构相关的 glibc 头文件：
+```
+*self_spec:
++ -B/usr/lib/x86_64-linux-gnu -idirafter /usr/include/x86_64-linux-gnu
+```
 
-  ```bash
-  export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
-  export CPATH=/usr/include/x86_64-linux-gnu
-  ```
+GCC 会**自动加载**这个位置的 specs 文件，所以没有任何下游需要记住一个参数，也没有
+任何 CI job 需要导出环境变量。三个细节值得说明：
 
-  `verify` 的 crt 检查**仍然会红**，因为它走 `-print-file-name`，那条路不查
-  `LIBRARY_PATH`。真正能定性的是链接一个共享库——PyPTO 的扩展模块就是共享库：
+- **用 `-B` 而不是 `LIBRARY_PATH`。** `-B` 参与 `-print-file-name` 所查的 startfile
+  搜索，所以 `verify` 的 crt 检查和链接本身是同一个理由通过的。`LIBRARY_PATH` 不被
+  `-print-file-name` 查询，这正是旧变通办法即使能编译、那项检查也仍然是红的原因。
+- **用 `-idirafter` 而不是 `-I`。** multiarch 头文件目录排在最后，bundle 自带的 C++
+  头文件优先级不受影响。已在 Ubuntu 24.04 上确认：`<format>` 仍然解析到 bundle 内部。
+- **靠行为检测，不读 `/etc/os-release`。** 只有在编译器找不到 `crt1.o` **且**
+  `/usr/lib/*/crt1.o` 存在时才写这个文件。RHEL 机器因此永远不会拿到 specs 文件。
 
-  ```bash
-  echo 'extern "C" int f(){return 42;}' \
-    | g++-15 -std=c++23 -shared -fPIC -x c++ - -o /tmp/t.so \
-    && python3.10 -c 'import ctypes; print(ctypes.CDLL("/tmp/t.so").f())'
-  ```
+最后一条是正确性要求，不是洁癖。在一台 `ld.so.conf` 里挂了第二份 GCC 的 `libgcc_s`
+的机器上——手工部署的 `/data/software/gcc-15`，正是这个 bundle 要消灭的那种漂移——
+**只要存在**用户 specs 文件，C++ 链接就会以 `DSO missing from command line` 失败，
+跟文件内容无关。无条件写入等于为了修 Debian 而弄坏本来正常的 RHEL 机器。
 
-正经支持 Debian 意味着给 bundle 配 sysroot。那同时会给工具链**产出**的东西也定住
-glibc 版本——今天在一台 2.34 的机器上构建出的产物就要求 2.34，无论 bundle 自己的下限
-是多少。这是设计改动，不是配置改动。
+这个文件在版本前缀内部，所以 `install --force` 和每次版本升级都会重新生成，不需要
+额外维护。
+
+### 已验证
+
+Ubuntu 24.04.3，x86_64，glibc 2.39，CANN 9.2.0：`verify` 十二项全过。用 `-std=c++23`
+编出的共享库能通过 `ctypes` 加载，链接 `libascendcl.so` 没有 `@GLIBC_2.xx` 版本冲突。
+
+### 为什么不配 sysroot
+
+配 sysroot 是教科书解法，但在这里是错的解法。它会把工具链**产出物**的 glibc 版本也
+钉死——今天在 2.34 宿主上构建的产物就要求 2.34，跟 bundle 自己声明的下限无关。更麻烦
+的是，sysroot 里的 glibc 必须不低于产出物所链接的每一个宿主库的 glibc，CANN 也在内；
+而那个版本是机器绑定的、不在 bundle 里，于是 bundle 反过来要追着它本该抽象掉的那个
+fleet 走。sysroot 还会把宿主的 `/usr/include` 整个遮蔽，三个 PyPTO 仓库依赖的每一个
+系统头文件都要显式列出并长期维护。这是设计变更，不是配置变更。

@@ -66,6 +66,62 @@ version_ge() { [ "$1" = "$2" ] || [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | t
 # "could not detect glibc" on a host that is perfectly fine.
 host_glibc() { ldd --version 2>/dev/null | sed -n '1s/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p'; }
 
+# Teach the bundle's GCC where a multiarch host keeps the C runtime.
+#
+# The bundle carries a compiler, not a libc, and its GCC resolves crt1.o and the
+# arch-specific glibc headers through paths baked in at configure time — the
+# build image's RHEL layout (/usr/lib64, /usr/include). Debian and Ubuntu use a
+# multiarch triplet directory instead, so linking fails there with a message
+# about crt1.o that reads like a corrupt bundle.
+#
+# A specs file in GCC's own lib directory is loaded automatically, so nothing
+# downstream has to remember a flag or an environment variable. -B is what makes
+# it work rather than LIBRARY_PATH: -B participates in the startfile search that
+# -print-file-name consults, so `verify` needs no special case. -idirafter puts
+# the multiarch include directory last, leaving the bundle's own C++ headers
+# ahead of it.
+#
+# Written only when the compiler genuinely cannot find crt1.o and a multiarch
+# directory has it — a behavioural test, not a check of /etc/os-release. RHEL
+# hosts therefore never get a specs file at all, which matters: on a machine
+# whose ld.so.conf carries a second GCC's libgcc_s (a hand-deployed
+# /data/software/gcc-15, exactly the drift this bundle exists to replace), the
+# mere presence of a user specs file breaks C++ linking with "DSO missing from
+# command line" — regardless of what the file contains.
+write_multiarch_specs() {
+    local prefix="$1"
+    local gxx="$prefix/gcc/bin/g++-15"
+    [ -x "$gxx" ] || return 0
+
+    # -print-file-name echoes the bare name back when it cannot resolve it.
+    local crt; crt="$("$gxx" -print-file-name=crt1.o 2>/dev/null)"
+    [ -e "$crt" ] && return 0
+
+    # Discover the layout rather than the distribution: whichever directory
+    # actually holds crt1.o names the triplet, on any arch. Tested for emptiness
+    # BEFORE dirname, which turns "" into "." — that would sail through a plain
+    # [ -d ] and write a specs file saying -B. on an RHEL host that is merely
+    # missing glibc-devel, breaking a link that would otherwise have reported
+    # the missing package plainly.
+    local found; found="$(ls /usr/lib/*/crt1.o 2>/dev/null | head -1)"
+    [ -n "$found" ] || return 0
+    local lib; lib="$(dirname "$found")"
+    local inc; inc="/usr/include/$(basename "$lib")"
+    [ -d "$lib" ] && [ -d "$inc" ] || return 0
+
+    local libgcc; libgcc="$("$gxx" -print-libgcc-file-name 2>/dev/null)"
+    [ -e "$libgcc" ] || return 0
+    local specs; specs="$(dirname "$libgcc")/specs"
+
+    if printf '*self_spec:\n+ -B%s -idirafter %s\n' "$lib" "$inc" > "$specs" 2>/dev/null; then
+        ok "multiarch host: taught GCC $lib"
+        info "      ${DIM}wrote $specs${RESET}"
+    else
+        warn "could not write $specs" \
+             "this host needs it to link; check permissions and reinstall"
+    fi
+}
+
 # Locate a CANN install without assuming a version. Order of preference: what
 # the operator declared, then the vendor's own "latest" symlink, then any
 # versioned install under the conventional root, newest first.
@@ -320,6 +376,11 @@ cmd_install() {
     rm -rf "$staging"
     ok "unpacked to $prefix"
 
+    # Before verify, so a multiarch host reports the same clean bill of health
+    # as an RHEL one. Re-run on every install, including --force, because the
+    # unpack above replaced the prefix wholesale.
+    write_multiarch_specs "$prefix"
+
     "$0" verify --version "$version"
 }
 
@@ -446,9 +507,11 @@ cmd_verify() {
         ok "host binutils and C runtime present"
     else
         bad "host binutils and C runtime present" \
-            "the bundle carries a compiler but not a libc; install binutils and glibc-devel
-      (dnf install binutils glibc-devel). Note the bundle assumes an RHEL-family
-      layout for these — Debian's multiarch paths are not supported."
+            "the bundle carries a compiler but not a libc; install them from the host:
+      RHEL family    dnf install binutils glibc-devel
+      Debian/Ubuntu  apt install binutils libc6-dev
+      If the packages are already present on a Debian-family host, the multiarch
+      specs file is missing: re-run 'pypto-toolchain install <version> --force'."
     fi
 
     local probe; probe="$(mktemp -u)"
@@ -585,7 +648,8 @@ cmd_doctor() {
     if [ -n "$crt" ] && [ -e "$crt" ] && command -v as >/dev/null 2>&1 && command -v ld >/dev/null 2>&1; then
         ok "binutils + C runtime"
     else
-        bad "binutils + C runtime" "dnf install binutils glibc-devel"
+        bad "binutils + C runtime" \
+            "dnf install binutils glibc-devel  (Debian/Ubuntu: apt install binutils libc6-dev)"
     fi
 
     local cann
