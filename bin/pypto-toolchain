@@ -109,13 +109,25 @@ write_multiarch_specs() {
     local inc; inc="/usr/include/$(basename "$lib")"
     [ -d "$lib" ] && [ -d "$inc" ] || return 0
 
+    # libgcc.a sits in the directory GCC auto-loads `specs` from, so asking for
+    # it is the authoritative way to find that directory across GCC versions.
     local libgcc; libgcc="$("$gxx" -print-libgcc-file-name 2>/dev/null)"
     [ -e "$libgcc" ] || return 0
-    local specs; specs="$(dirname "$libgcc")/specs"
+    local specsdir; specsdir="$(dirname "$libgcc")"
+    local specs="$specsdir/specs"
+
+    # GCC answers with its own resolved path, which walks through `bin/..` and
+    # through whatever /opt/pypto is a symlink to. Correct, but it contradicts
+    # the prefix every other line of this output names, so re-root it for the
+    # report only; the file is still written where GCC said.
+    local shown="$prefix/gcc/lib/gcc/${specsdir##*/lib/gcc/}/specs"
 
     if printf '*self_spec:\n+ -B%s -idirafter %s\n' "$lib" "$inc" > "$specs" 2>/dev/null; then
-        ok "multiarch host: taught GCC $lib"
-        info "      ${DIM}wrote $specs${RESET}"
+        # Label kept short: ok() truncates at 46 columns, and the full multiarch
+        # path pushed the directory off the end of the line.
+        ok "multiarch layout: $(basename "$lib")"
+        info "      ${DIM}taught GCC $lib${RESET}"
+        info "      ${DIM}wrote $shown${RESET}"
     else
         warn "could not write $specs" \
              "this host needs it to link; check permissions and reinstall"
