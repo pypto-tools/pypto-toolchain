@@ -20,16 +20,21 @@ bundle 几乎不依赖宿主机，但"几乎"不是"完全"：
 装任何东西之前，先手工预检：
 
 ```bash
-uname -m                          # aarch64 或 x86_64
-ldd --version | head -1           # >= 2.28
-cat /etc/os-release               # RHEL 系或 Debian 系，都支持
-command -v as ld                  # binutils
-gcc -print-file-name=crt1.o       # 要得到一个存在的绝对路径，而不是裸的 "crt1.o"
+uname -m                                    # aarch64 或 x86_64
+ldd --version | head -1                     # >= 2.28
+cat /etc/os-release                         # RHEL 系或 Debian 系，都支持
+command -v as ld                            # binutils
+ls /usr/lib64/crt1.o /usr/lib/*/crt1.o      # C 运行时开发包
 ```
 
-最后一条和 `verify` 用的是同一个手法。GCC 找不到文件时会把裸文件名原样回显，所以
-只回显 `crt1.o` 表示"缺"，回显 `/usr/lib64/crt1.o`（Debian 和 Ubuntu 上是
-`/usr/lib/x86_64-linux-gnu/crt1.o`）表示包已经装了。
+最后一条查的是文件系统，而不是去问某个编译器——因为**宿主机并不需要自带 gcc**。一台
+装了 `binutils` 和 `glibc-devel`、但没有 `gcc` 的机器完全符合契约，而在那台机器上跑
+`gcc -print-file-name` 只会得到 `command not found`。命中一个就够：RHEL 系是
+`/usr/lib64/crt1.o`，Debian 和 Ubuntu 是 `/usr/lib/x86_64-linux-gnu/crt1.o`。
+
+`verify` 问的是**bundle 自带**的那个编译器，用的同样是 `-print-file-name=crt1.o`，
+但那要装完 bundle 之后才有。GCC 找不到文件时会把裸文件名原样回显，所以只回显
+`crt1.o` 表示"缺"，回显绝对路径表示包已经装了。
 
 在一台已经能构建 PyPTO 的机器上，这些通常本来就齐——**先查，再决定要不要动包管理器**。
 

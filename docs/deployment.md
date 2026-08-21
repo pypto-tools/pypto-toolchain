@@ -21,17 +21,24 @@ A bundle depends on almost nothing, but "almost" is not "nothing":
 Preflight by hand, before installing anything:
 
 ```bash
-uname -m                          # aarch64 or x86_64
-ldd --version | head -1           # >= 2.28
-cat /etc/os-release               # RHEL family, or Debian family — both work
-command -v as ld                  # binutils
-gcc -print-file-name=crt1.o       # an absolute path that exists, not a bare "crt1.o"
+uname -m                                    # aarch64 or x86_64
+ldd --version | head -1                     # >= 2.28
+cat /etc/os-release                         # RHEL family, or Debian family — both work
+command -v as ld                            # binutils
+ls /usr/lib64/crt1.o /usr/lib/*/crt1.o      # the C runtime dev package
 ```
 
-That last one is the same trick `verify` uses. When GCC cannot find a file it
-echoes the bare name back, so `crt1.o` on its own means "missing", while
-`/usr/lib64/crt1.o` — or `/usr/lib/x86_64-linux-gnu/crt1.o` on Debian and
-Ubuntu — means the package is there.
+The last one looks on the filesystem rather than asking a compiler, because the
+host is not required to have one of its own — a machine with `binutils` and
+`glibc-devel` but no `gcc` satisfies the contract in full, and `gcc
+-print-file-name` would only report `command not found` there. One hit is
+enough: `/usr/lib64/crt1.o` on an RHEL host, `/usr/lib/x86_64-linux-gnu/crt1.o`
+on Debian and Ubuntu.
+
+`verify` asks the *bundled* compiler the same question with
+`-print-file-name=crt1.o`, which is available only after the bundle is
+installed. When GCC cannot find a file it echoes the bare name back, so a reply
+of `crt1.o` means "missing" while an absolute path means the package is there.
 
 On a machine that already builds PyPTO, all of this is usually present already —
 check before reaching for the package manager.

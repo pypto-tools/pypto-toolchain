@@ -93,21 +93,27 @@ write_multiarch_specs() {
     local gxx="$prefix/gcc/bin/g++-15"
     [ -x "$gxx" ] || return 0
 
-    # -print-file-name echoes the bare name back when it cannot resolve it.
+    # -print-file-name echoes the bare name back when it cannot resolve it, so
+    # anything that is not an absolute path means "not found". Testing -e alone
+    # would resolve that bare name against the caller's working directory and
+    # call a stray ./crt1.o a success, silently skipping the specs file.
     local crt; crt="$("$gxx" -print-file-name=crt1.o 2>/dev/null)"
-    [ -e "$crt" ] && return 0
+    case "$crt" in /*) [ -e "$crt" ] && return 0 ;; esac
 
-    # Discover the layout rather than the distribution: whichever directory
-    # actually holds crt1.o names the triplet, on any arch. Tested for emptiness
-    # BEFORE dirname, which turns "" into "." — that would sail through a plain
-    # [ -d ] and write a specs file saying -B. on an RHEL host that is merely
-    # missing glibc-devel, breaking a link that would otherwise have reported
-    # the missing package plainly.
-    local found; found="$(ls /usr/lib/*/crt1.o 2>/dev/null | head -1)"
-    [ -n "$found" ] || return 0
-    local lib; lib="$(dirname "$found")"
-    local inc; inc="/usr/include/$(basename "$lib")"
-    [ -d "$lib" ] && [ -d "$inc" ] || return 0
+    # Name the triplet from the bundle's own compiler. Globbing /usr/lib/*/crt1.o
+    # and taking the first match picks i386-linux-gnu ahead of x86_64-linux-gnu
+    # on any host carrying libc6-dev:i386 — wine, Steam and 32-bit build chains
+    # all pull it in — which would aim a 64-bit compiler at 32-bit start files.
+    # uname -m would describe the host kernel; -dumpmachine describes what this
+    # compiler actually targets, which is what the startfile path has to match.
+    local machine; machine="$("$gxx" -dumpmachine 2>/dev/null)"
+    [ -n "$machine" ] || return 0
+    local lib="/usr/lib/${machine%%-*}-linux-gnu"
+    local inc="/usr/include/${machine%%-*}-linux-gnu"
+    # Both halves must be present: the library side for the crt files, the
+    # include side for the arch-specific glibc headers. Neither existing is the
+    # ordinary RHEL case, and it leaves this host without a specs file.
+    [ -e "$lib/crt1.o" ] && [ -d "$inc" ] || return 0
 
     # libgcc.a sits in the directory GCC auto-loads `specs` from, so asking for
     # it is the authoritative way to find that directory across GCC versions.
@@ -119,8 +125,14 @@ write_multiarch_specs() {
     # GCC answers with its own resolved path, which walks through `bin/..` and
     # through whatever /opt/pypto is a symlink to. Correct, but it contradicts
     # the prefix every other line of this output names, so re-root it for the
-    # report only; the file is still written where GCC said.
-    local shown="$prefix/gcc/lib/gcc/${specsdir##*/lib/gcc/}/specs"
+    # report only; the file is still written where GCC said. Falls back to the
+    # raw path when the layout is not the expected .../lib/gcc/<triplet>/<ver>,
+    # since ## leaves the string untouched on no match and would otherwise
+    # concatenate two absolute paths into nonsense.
+    local shown="$specs"
+    case "$specsdir" in
+        */lib/gcc/*) shown="$prefix/gcc/lib/gcc/${specsdir##*/lib/gcc/}/specs" ;;
+    esac
 
     if printf '*self_spec:\n+ -B%s -idirafter %s\n' "$lib" "$inc" > "$specs" 2>/dev/null; then
         # Label kept short: ok() truncates at 46 columns, and the full multiarch
@@ -367,6 +379,11 @@ cmd_install() {
 
     if [ -d "$prefix" ] && [ "$force" -eq 0 ]; then
         info "  already present at $prefix (use --force to reinstall)"
+        # A bundle unpacked before this host was adapted, or by an older CLI, is
+        # repaired by a plain `install` — the command someone who has just hit
+        # the crt1.o error will reach for. Idempotent, and writes nothing when
+        # the layout does not call for it.
+        write_multiarch_specs "$prefix"
         exec "$0" verify --version "$version"
     fi
 
@@ -515,7 +532,9 @@ cmd_verify() {
     # linker, which reads like a corrupt bundle rather than a missing package.
     local crt
     crt="$(run_in_env "$prefix/gcc/bin/g++-15" -print-file-name=crt1.o 2>/dev/null)"
-    if [ -e "$crt" ] && command -v as >/dev/null 2>&1 && command -v ld >/dev/null 2>&1; then
+    # Only an absolute path counts as resolved; see write_multiarch_specs.
+    case "$crt" in /*) ;; *) crt="" ;; esac
+    if [ -n "$crt" ] && [ -e "$crt" ] && command -v as >/dev/null 2>&1 && command -v ld >/dev/null 2>&1; then
         ok "host binutils and C runtime present"
     else
         bad "host binutils and C runtime present" \
@@ -656,7 +675,8 @@ cmd_doctor() {
     # The bundle ships a compiler, not a C library; these come from the machine.
     local crt=""
     if command -v gcc >/dev/null 2>&1; then crt="$(gcc -print-file-name=crt1.o 2>/dev/null)"; fi
-    [ -e "$crt" ] || crt="$(ls /usr/lib64/crt1.o /usr/lib/*/crt1.o 2>/dev/null | head -1)"
+    case "$crt" in /*) ;; *) crt="" ;; esac
+    [ -n "$crt" ] && [ -e "$crt" ] || crt="$(ls /usr/lib64/crt1.o /usr/lib/*/crt1.o 2>/dev/null | head -1)"
     if [ -n "$crt" ] && [ -e "$crt" ] && command -v as >/dev/null 2>&1 && command -v ld >/dev/null 2>&1; then
         ok "binutils + C runtime"
     else
