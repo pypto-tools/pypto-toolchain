@@ -15,22 +15,30 @@ A bundle depends on almost nothing, but "almost" is not "nothing":
 | aarch64 or x86_64 | `install.sh`, before downloading | the only two architectures built |
 | glibc >= 2.28 | `install.sh`, before downloading | the floor the bundles are built against |
 | `binutils` (`as`, `ld`) | `doctor`, `verify` | GCC drives the system assembler and linker |
-| `glibc-devel` (`crt1.o`, `libc.so`) | `doctor`, `verify` | the C runtime startup files every link needs |
-| RHEL-family layout | not checked — see below | GCC's library paths are baked in at configure time |
+| `glibc-devel` / `libc6-dev` (`crt1.o`, `libc.so`) | `doctor`, `verify` | the C runtime startup files every link needs |
+| multiarch layout, if any | `install`, which then adapts to it | GCC's library paths are baked in at configure time — see below |
 
 Preflight by hand, before installing anything:
 
 ```bash
-uname -m                          # aarch64 or x86_64
-ldd --version | head -1           # >= 2.28
-cat /etc/os-release               # HCE2 / openEuler / AlmaLinux / Rocky
-command -v as ld                  # binutils
-gcc -print-file-name=crt1.o       # an absolute path that exists, not a bare "crt1.o"
+uname -m                                    # aarch64 or x86_64
+ldd --version | head -1                     # >= 2.28
+cat /etc/os-release                         # RHEL family, or Debian family — both work
+command -v as ld                            # binutils
+ls /usr/lib64/crt1.o /usr/lib/*/crt1.o      # the C runtime dev package
 ```
 
-That last one is the same trick `verify` uses. When GCC cannot find a file it
-echoes the bare name back, so `crt1.o` on its own means "missing", while
-`/usr/lib64/crt1.o` means the package is there.
+The last one looks on the filesystem rather than asking a compiler, because the
+host is not required to have one of its own — a machine with `binutils` and
+`glibc-devel` but no `gcc` satisfies the contract in full, and `gcc
+-print-file-name` would only report `command not found` there. One hit is
+enough: `/usr/lib64/crt1.o` on an RHEL host, `/usr/lib/x86_64-linux-gnu/crt1.o`
+on Debian and Ubuntu.
+
+`verify` asks the *bundled* compiler the same question with
+`-print-file-name=crt1.o`, which is available only after the bundle is
+installed. When GCC cannot find a file it echoes the bare name back, so a reply
+of `crt1.o` means "missing" while an absolute path means the package is there.
 
 On a machine that already builds PyPTO, all of this is usually present already —
 check before reaching for the package manager.
@@ -232,7 +240,8 @@ sudo PYPTO_TOOLCHAIN_REPO=/path/to/pypto-toolchain bash /path/to/install.sh --st
 | `install` hangs with no progress | proxy did not survive `sudo` | `sudo env https_proxy=... <abs path> install <v>` |
 | `sorry, you are not allowed to set the following environment variables` | `sudo VAR=value` without `SETENV` | use `sudo env` instead |
 | `could not obtain a bundle matching sha256` | `objects.githubusercontent.com` unreachable | sideload into the cache, or set `PYPTO_TOOLCHAIN_MIRROR` |
-| `cannot find crt1.o` from the linker | `glibc-devel` missing — or a Debian host | `dnf install glibc-devel`; on Debian, see below |
+| `cannot find crt1.o` from the linker | the C runtime dev package is missing | `dnf install glibc-devel`, or `apt install libc6-dev` |
+| `cannot find crt1.o` on Debian/Ubuntu with `libc6-dev` already installed | the multiarch specs file was never written, or a reinstall wiped it | `pypto-toolchain install <version> --force` |
 | `verify`: `prefix matches build` fails | unpacked somewhere other than `/opt/pypto/toolchain/<version>` | reinstall; the prefix is compiled in, not configurable |
 | `doctor`: `no conda under …` while the prompt says `(base)` | it looks at `${CONDA_ROOT:-$HOME/miniconda3}` | `CONDA_ROOT="$(conda info --base)" pypto-toolchain doctor` |
 | `dnf` fails with 403 on repodata | the host's own package mirror, unrelated to this tool | `dnf clean all`; then switch mirrors, or skip it if the preflight already passed |
@@ -241,44 +250,63 @@ sudo PYPTO_TOOLCHAIN_REPO=/path/to/pypto-toolchain bash /path/to/install.sh --st
 block an install. They describe the state the machine is in today, and they go
 quiet once the migration is done.
 
-## Debian and Ubuntu are not supported
+## Debian and Ubuntu
 
-`install.sh` does not check the distribution, so a Debian-family host installs
-cleanly and then fails at `verify`, with a message about `crt1.o` that reads like
-a corrupt bundle.
+Supported, with one adaptation that `install` applies on its own.
 
-The cause is layout. GCC resolves `crt1.o` and friends through library paths
-baked in at configure time, in the build image's RHEL layout (`/usr/lib64`);
-Debian and Ubuntu use a multiarch triplet directory
+GCC resolves `crt1.o` and the arch-specific glibc headers through library paths
+baked in at configure time, in the build image's RHEL layout (`/usr/lib64`,
+`/usr/include`). Debian and Ubuntu use a multiarch triplet directory
 (`/usr/lib/x86_64-linux-gnu`) instead. Installing `libc6-dev` puts the files on
-the disk but not where the compiler looks.
+the disk but not where the compiler looks, so the link fails with a message
+about `crt1.o` that reads like a corrupt bundle.
 
-Two workarounds exist, neither supported:
+`install` closes the gap by writing a specs file into GCC's own lib directory:
 
-- Run the build in a RHEL-family container. Not an option on a host that also
-  runs device or HCCL jobs — the chip child dies silently in `comm_init` inside
-  docker.
-- Point GCC at the multiarch directories by hand. Both sides need it — the
-  library side for the crt files, and the include side for the arch-specific
-  glibc headers:
+```
+*self_spec:
++ -B/usr/lib/x86_64-linux-gnu -idirafter /usr/include/x86_64-linux-gnu
+```
 
-  ```bash
-  export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
-  export CPATH=/usr/include/x86_64-linux-gnu
-  ```
+GCC loads a specs file found there automatically, so no consumer has to
+remember a flag and no CI job has to export anything. Three details matter:
 
-  `verify` still reports the crt check as failed, because it goes through
-  `-print-file-name`, which does not consult `LIBRARY_PATH`. Linking a shared
-  object is the test that matters here, since that is what a PyPTO extension
-  module is:
+- **`-B`, not `LIBRARY_PATH`.** `-B` joins the startfile search that
+  `-print-file-name` consults, so `verify`'s crt check passes for the same
+  reason the link does. `LIBRARY_PATH` is not consulted by `-print-file-name`,
+  which is why the older workaround left that check red even when builds worked.
+- **`-idirafter`, not `-I`.** The multiarch include directory goes last, so the
+  bundle's own C++ headers keep priority. Confirmed on Ubuntu 24.04:
+  `<format>` still resolves inside the bundle.
+- **Detected by behaviour, not by `/etc/os-release`.** `install` writes the file
+  only when the compiler cannot find `crt1.o` *and* a `/usr/lib/*/crt1.o`
+  exists. An RHEL host therefore never gets a specs file.
 
-  ```bash
-  echo 'extern "C" int f(){return 42;}' \
-    | g++-15 -std=c++23 -shared -fPIC -x c++ - -o /tmp/t.so \
-    && python3.10 -c 'import ctypes; print(ctypes.CDLL("/tmp/t.so").f())'
-  ```
+That last point is a correctness requirement, not tidiness. On a host whose
+`ld.so.conf` carries a second GCC's `libgcc_s` — a hand-deployed
+`/data/software/gcc-15`, exactly the drift this bundle exists to replace — the
+*presence* of any user specs file breaks C++ linking with `DSO missing from
+command line`, whatever the file contains. Writing one unconditionally would
+have broken working RHEL machines to fix Debian ones.
 
-Supporting Debian properly means shipping a sysroot, which would also bound the
-glibc version of everything the toolchain *produces* — today an artifact built on
-a 2.34 host requires 2.34, whatever the bundle's own floor says. That is a design
-change, not a configuration one.
+The file lives inside the version prefix, so `install --force` and every version
+upgrade recreate it; nothing else needs doing.
+
+### Verified
+
+Ubuntu 24.04.3, x86_64, glibc 2.39, CANN 9.2.0: `verify` passes all twelve
+checks. A shared object built with `-std=c++23` loads through `ctypes`, and
+linking `libascendcl.so` produces no `@GLIBC_2.xx` version conflict.
+
+### Why not a sysroot
+
+Shipping a sysroot is the textbook fix, and it is the wrong one here. It would
+bound the glibc version of everything the toolchain *produces* — today an
+artifact built on a 2.34 host requires 2.34, whatever the bundle's own floor
+says. Worse, the sysroot's glibc would have to be at least as new as the glibc
+of every host library the artifacts link against, CANN included; that version is
+machine-bound and outside the bundle, so the bundle would end up tracking the
+fleet it was built to abstract over. A sysroot would also hide the host's
+`/usr/include` entirely, forcing every system header the three PyPTO
+repositories rely on to be enumerated and maintained. That is a design change,
+not a configuration one.
