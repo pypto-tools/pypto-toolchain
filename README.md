@@ -67,6 +67,10 @@ keeps the GCC/Python source mirrors while using official PyPI.
 Produces `dist/pypto-toolchain-<version>-<arch>.tar.gz`, its `.sha256`, and
 updates `manifest/<version>.env`.
 
+Before export, the build removes regenerable Python bytecode caches and CPython
+debug information, and stores identical large files as hard links. All packages,
+offline wheels, development headers, static libraries, and licenses are retained.
+
 The container only *builds* the tree. It is exported as a tarball and unpacked
 on bare metal, because the device/HCCL jobs cannot run inside docker — the chip
 child silently dies in `comm_init`.
