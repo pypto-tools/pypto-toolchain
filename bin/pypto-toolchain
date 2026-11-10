@@ -520,11 +520,18 @@ cmd_verify() {
     # LD_LIBRARY_PATH, so invoking the binaries bare tests a configuration
     # nobody uses — and reports a missing libffi even when the bundle contains
     # it. This also makes activate.sh itself part of what is verified.
-    run_in_env() { ( . "$prefix/activate.sh"; "$@" ); }
+    run_in_env() { (
+        # Host CANN scripts assume ordinary shell settings and expand variables
+        # that can be unset after sudo. Do not impose the CLI's nounset on them.
+        set +u
+        . "$prefix/activate.sh" || exit $?
+        set -u
+        "$@"
+    ); }
 
     local out
     if out="$(run_in_env "$prefix/python/bin/python3.10" \
-                -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip;print("ok")' 2>&1)" \
+                -I -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip;print("ok")' 2>&1)" \
        && [ "$out" = "ok" ]; then
         ok "python3.10 stdlib imports"
     else
@@ -578,8 +585,11 @@ cmd_verify() {
         else
             bad "Python headers and libatomic" "missing Python.h or libatomic.so.1"
         fi
-        if out="$(run_in_env "$prefix/python/bin/python3.10" -c \
-            'import torch,pytest,nanobind,scikit_build_core,numpy,safetensors; assert torch.version.cuda is None; print(torch.__version__)' 2>&1)"; then
+        # User-site packages and host PYTHONPATH can shadow the bundle. Check
+        # the bundled interpreter in isolation and match its actual torch pin.
+        if out="$(run_in_env "$prefix/python/bin/python3.10" -I -c \
+            'import sys,torch,pytest,nanobind,scikit_build_core,numpy,safetensors; assert torch.version.cuda is None; assert torch.__version__ == sys.argv[1], (torch.__version__, sys.argv[1]); print(torch.__version__)' \
+            "$(bundle_field "$prefix" TORCH_VERSION)" 2>&1)"; then
             ok "simpler Python and CPU torch ($out)"
         else
             bad "simpler Python and CPU torch" "$out"
