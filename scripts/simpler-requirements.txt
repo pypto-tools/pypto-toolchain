@@ -1,0 +1,16 @@
+# Python 3.10 packages shared by simpler CPU and NPU jobs. Torch is fetched
+# separately from the PyTorch CPU index; never let PyPI select a CUDA wheel.
+cmake==3.31.10
+ninja==1.13.0
+clang-tidy==19.1.0.1
+scikit-build-core==0.12.2
+nanobind==2.11.0
+pytest==8.4.2
+pytest-timeout==2.4.0
+pytest-xdist==3.8.0
+PyYAML==6.0.3
+cloudpickle==3.1.2
+numpy==1.26.4
+safetensors==0.5.3
+pre-commit==4.5.1
+ruff==0.14.8

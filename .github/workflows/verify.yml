@@ -102,11 +102,13 @@ jobs:
         # The same capability assertions the PyPTO repositories make, so a bundle
         # that would fail their CI fails here first.
         run: |
-          pypto-toolchain verify \
-            --require python=3.10 \
-            --require 'gcc>=15' \
-            --require 'ccache>=4.8' \
-            --require 'uv>=0.5'
+          requirements=(--require python=3.10 --require 'gcc>=15' \
+            --require 'ccache>=4.8' --require 'uv>=0.5')
+          if grep -q '^TORCH_VERSION=' "manifest/${{ steps.v.outputs.version }}.env"; then
+            requirements+=(--require 'cmake>=3.20' --require 'ninja>=1.11' \
+              --require 'node>=20' --require 'torch=2.6')
+          fi
+          pypto-toolchain verify "${requirements[@]}"
 
       - name: Use it for real — venv, uv, a C++23 compile
         # verify proves the pieces run. This proves they work together as a
@@ -115,16 +117,27 @@ jobs:
         # genuinely needs C++23 rather than merely being compiled with the flag.
         run: |
           set -euo pipefail
-          source /opt/pypto/toolchain/current/activate.sh
+          source /opt/pypto/toolchain/${{ steps.v.outputs.version }}/activate.sh
 
           test "$(command -v python3.10)" = "$PYPTO_TOOLCHAIN/python/bin/python3.10"
           test "$(command -v g++-15)"     = "$PYPTO_TOOLCHAIN/gcc/bin/g++-15"
 
-          python3.10 -m venv /tmp/probe-venv
+          python3.10 -m venv --system-site-packages /tmp/probe-venv
           . /tmp/probe-venv/bin/activate
-          uv pip install --python "$(command -v python)" 'packaging>=24'
-          python -c 'import packaging, ssl, ctypes, sqlite3; print("venv ok", packaging.__version__)'
+          if [ -d "${PYPTO_WHEELHOUSE:-}" ]; then
+            python -m pip install --no-index --find-links "$PYPTO_WHEELHOUSE" 'packaging>=24'
+            python -c 'import packaging, torch, pytest, nanobind, ssl, ctypes, sqlite3; assert torch.version.cuda is None; print("venv ok", packaging.__version__)'
+          else
+            uv pip install --python "$(command -v python)" 'packaging>=24'
+            python -c 'import packaging, ssl, ctypes, sqlite3; print("venv ok", packaging.__version__)'
+          fi
           deactivate
+
+          if [ -d "${PYPTO_WHEELHOUSE:-}" ]; then
+            node --version
+            markdownlint-cli2 --version
+            printf 'digraph { a -> b }\n' | dot -Tsvg | grep -q '<svg'
+          fi
 
           cat > /tmp/probe.cpp <<'CPP'
           #include <expected>

@@ -27,6 +27,14 @@ set -euo pipefail
 BUNDLED="$PREFIX/lib/bundled"
 mkdir -p "$BUNDLED"
 
+# Auditwheel puts wheel-private dependencies in sibling *.libs directories.
+# ldd on an individual .so does not inherit the wheel loader's search path,
+# even though importing the package resolves them. Include those directories
+# only while auditing; activate.sh must not add them to the global loader path.
+WHEEL_LIB_DIRS="$(find "$PREFIX/python/lib/python3.10/site-packages" \
+    -maxdepth 1 -type d -name '*.libs' -print | paste -sd: -)"
+AUDIT_LIB_PATH="$PREFIX/gcc/lib64:$PREFIX/python/lib:$BUNDLED${WHEEL_LIB_DIRS:+:$WHEEL_LIB_DIRS}"
+
 # Libraries every glibc host provides, and which must NOT be shipped: they are
 # part of the C runtime and pairing a copied libc with the host's loader is a
 # reliable way to produce a bundle that segfaults. libstdc++/libgcc_s are
@@ -64,7 +72,7 @@ copy_pass() {
     local copied=0 f soname path
     while read -r f; do
         # `ldd` on a non-ELF file just fails; skip those quietly.
-        ldd "$f" 2>/dev/null | while read -r soname _arrow path _addr; do
+        LD_LIBRARY_PATH="$AUDIT_LIB_PATH" ldd "$f" 2>/dev/null | while read -r soname _arrow path _addr; do
             case "$soname" in *.so*) ;; *) continue ;; esac
             is_core_lib "$soname" && continue
             [ -n "$path" ] && [ -e "$path" ] || continue
@@ -107,7 +115,7 @@ echo "== $prev libraries bundled"
 echo "== verifying self-containment"
 status=0
 while read -r f; do
-    out="$(env -i LD_LIBRARY_PATH="$PREFIX/gcc/lib64:$PREFIX/python/lib:$BUNDLED" \
+    out="$(env -i LD_LIBRARY_PATH="$AUDIT_LIB_PATH" \
            ldd "$f" 2>/dev/null)" || continue
     while read -r soname _arrow path _addr; do
         case "$soname" in *.so*) ;; *) continue ;; esac

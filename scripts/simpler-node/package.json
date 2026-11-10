@@ -1,0 +1,8 @@
+{
+  "name": "pypto-toolchain-simpler-node",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "markdownlint-cli2": "0.20.0"
+  }
+}

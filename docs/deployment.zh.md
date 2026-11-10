@@ -136,7 +136,7 @@ sudo dnf install -y binutils glibc-devel git tar findutils diffutils
 curl -fsSL https://raw.githubusercontent.com/pypto-tools/pypto-toolchain/main/install.sh \
   | sudo env https_proxy=http://127.0.0.1:7892 bash -s -- --storage /data/pypto
 
-# 3. 在决定下载 200 MB 之前，先勘察这台机器
+# 3. 下载 bundle 前，先勘察这台机器
 pypto-toolchain doctor
 
 # 4. 下载、校验、解压
@@ -159,6 +159,27 @@ pypto-toolchain verify
 source /opt/pypto/toolchain/2026.08.5/activate.sh
 ```
 
+从 `2026.11.1` 起，CPU 和 NPU 作业使用同一包、同一条激活命令：
+
+```bash
+source /opt/pypto/toolchain/2026.11.1/activate.sh
+```
+
+包内已有 Python 3.10、GCC 15、CMake、Ninja、clang-tidy、Graphviz、GoogleTest、
+Node 20、markdownlint、CPU 版 torch 和 simpler 构建／测试依赖。CANN 与驱动仍由
+NPU 主机提供；激活脚本会在主机存在 CANN 时加载其环境。针对当前 simpler 工作树，
+使用包内 Python 建立本地 venv，从 wheelhouse 离线安装 Python 依赖：
+
+```bash
+python3.10 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install --no-index --find-links "$PYPTO_WHEELHOUSE" \
+  --no-build-isolation '.[test]'
+```
+
+需要嵌入 PTO-ISA 头文件的构建目标，还需要与当前 simpler 提交匹配的
+`build/pto-isa` 源码；缺失时由 simpler 另行拉取，bundle 不覆盖其版本钉选。
+
 ## bundle 落在哪
 
 `/opt/pypto/toolchain/<版本>` 编译进了二进制，所以**路径字符串**是固定的。物理位置不
@@ -179,7 +200,7 @@ source /opt/pypto/toolchain/2026.08.5/activate.sh
 
 - **home 目录或 CI 工作区。** CLI 当初就是为此从 `/home/pypto-tools` 搬走的，
   `install.sh` 至今还在提示那个旧布局。工作区清理、用户配额、家目录备份工具，都会把
-  200 MB × N 个版本当成该回收或该复制的东西。
+  发布包大小 × N 个版本当成该回收或该复制的东西。
 - **NFS。** `root_squash` 会让 root 的解压写不进去，而且从 NFS 跑编译器慢得能感觉到。
   选位置前先 `df -T <路径>`。
 
