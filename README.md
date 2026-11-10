@@ -4,9 +4,9 @@ One reproducible host toolchain for every machine that builds PyPTO — CI
 runners, development boxes, new hardware.
 
 A **bundle** is a `.tar.gz` holding a prebuilt CPython, GCC (with the libstdc++
-`ptoas` links against), `uv` and `ccache`. It unpacks into a fixed prefix, is
+`ptoas` links against), `uv`, `ccache`, and the simpler CPU/NPU host environment. It unpacks into a fixed prefix, is
 identified by one version number, and is verified by one sha256. Two machines
-that report the same bundle version are byte-for-byte identical.
+that report the same bundle version and architecture use the same bytes.
 
 ## Why this exists
 
@@ -27,10 +27,10 @@ namespacing that keeps a `pto-isa` bump from reusing stale objects.
 The bundle removes the whole class of problem by depending on almost nothing:
 
 ```
-bundle requires from the host = { Linux kernel, glibc >= 2.28, aarch64 or x86_64 }
+bundle requires from the host = { Linux kernel, glibc >= 2.28, binutils, C runtime development files, aarch64 or x86_64 }
 ```
 
-Everything else it carries.
+NPU jobs additionally require the host's CANN and driver.
 
 ## What is and is not in the bundle
 
@@ -38,14 +38,17 @@ Everything else it carries.
 | --- | --- | --- |
 | in | CPython 3.10 | no distro in the fleet ships it |
 | in | GCC 15 + libstdc++ | simpler's sim kernels need `-std=c++23`; `ptoas` needs `GLIBCXX_3.4.29` and HCE2 stops at 3.4.28 |
-| in | `uv` | per-job venvs get torch by hardlink from a shared cache |
+| in | `uv` | fast per-project virtual environments and Python package operations |
 | in | `ccache` >= 4.8 | `CCACHE_NAMESPACE` is ignored before 4.8 |
+| in | CMake, Ninja, clang-tidy, Graphviz, GoogleTest, Node 20 and markdownlint | common native and lint tools for simpler on both host architectures |
+| in | CPU torch and simpler's Python build/test dependencies | inherited by project-local `--system-site-packages` venvs; wheels are also available offline in `wheelhouse/` |
 | out | `ptoas` | pinned per project in `pypto/toolchain/versions.env`, fetched per job; bumped far more often |
 | out | CANN / NPU driver | bound to the machine; detected, never deployed |
-| out | torch, numpy, … | project dependencies; installed into each job's venv |
+| out | the current simpler checkout | built from that checkout for its selected sim or NPU target |
 
-The split is by **rate of change**, not by kind of tool. Putting `ptoas` in the
-bundle would turn a zero-cost version bump into a fleet-wide redeployment.
+The host tools and simpler dependencies share one bundle version. Updating a
+Python dependency therefore publishes a new complete bundle. `ptoas` and CANN
+remain outside it because their version and host requirements differ.
 
 ## Build
 
@@ -56,6 +59,10 @@ two machines and merged into one manifest.
 scripts/build.sh 2026.08.1              # host arch, upstream sources
 scripts/build.sh 2026.08.1 --mirror cn  # domestic source mirrors
 ```
+
+`PYPTO_PYPI_INDEX` overrides only the Python package index; for example,
+`PYPTO_PYPI_INDEX=https://pypi.org/simple scripts/build.sh 2026.11.1 --mirror cn`
+keeps the GCC/Python source mirrors while using official PyPI.
 
 Produces `dist/pypto-toolchain-<version>-<arch>.tar.gz`, its `.sha256`, and
 updates `manifest/<version>.env`.
@@ -86,17 +93,32 @@ mean.
 ## Use
 
 ```bash
-source /opt/pypto/toolchain/current/activate.sh
+source /opt/pypto/toolchain/<version>/activate.sh
 ```
 
-In CI, assert capabilities rather than a version, so upgrading the bundle does
-not require touching any consumer repository:
+Consumers pin the versioned path to avoid a `current` switch during a job:
 
 ```yaml
 - run: |
-    pypto-toolchain verify --require python=3.10 --require gcc'>='15 --require ccache'>='4.8
-    source /opt/pypto/toolchain/current/activate.sh
+    pypto-toolchain verify --version 2026.11.1 --require python=3.10 --require gcc'>='15 --require torch=2.6
+    source /opt/pypto/toolchain/2026.11.1/activate.sh
 ```
+
+`activate.sh` selects the bundled tools and, when a host CANN install exists,
+sources its environment without querying a device. CPU and NPU jobs use the
+same source line. For a simpler checkout, create its local venv with the bundled
+Python and install its Python dependencies without a package index:
+
+```bash
+python3.10 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install --no-index --find-links "$PYPTO_WHEELHOUSE" \
+    --no-build-isolation '.[test]'
+```
+
+Build targets that embed PTO-ISA headers also need simpler's pinned `pto-isa`
+source checkout at `build/pto-isa`; simpler acquires that source separately when
+it is absent. The bundle does not override the checkout's pin.
 
 ## The prefix is fixed
 

@@ -8,14 +8,14 @@
 # -----------------------------------------------------------------------------------------------------------
 #
 # The single definition of the PyPTO host toolchain. Everything a PyPTO build
-# needs that is NOT pinned per-project lives here: a CPython, a GCC (with the
-# libstdc++ ptoas links against), uv and ccache.
+# needs that is NOT pinned per-project lives here: CPython, GCC (with the
+# libstdc++ ptoas links against), uv, ccache, and simpler's host dependencies.
 #
 # Deliberately NOT in the bundle:
 #   ptoas      pinned per-project in pypto/toolchain/versions.env and fetched
 #              per job; bumped far more often than this bundle.
 #   CANN       bound to the machine's driver; detected, never deployed.
-#   torch etc. project dependencies; installed into each job's venv by uv.
+#   The current simpler checkout: built per job for the selected target.
 #
 # The container only BUILDS the tree. It is exported as a tarball and unpacked
 # on bare metal, because the device/HCCL jobs cannot run inside docker (the chip
@@ -52,11 +52,14 @@ ARG GCC_VERSION=15.2.0
 ARG PYTHON_VERSION=3.10.18
 ARG UV_VERSION=0.9.28
 ARG CCACHE_VERSION=4.10.2
+ARG NODE_VERSION=20.19.5
+ARG GTEST_VERSION=1.14.0
 
 # Source mirrors. Default to upstream; scripts/build.sh overrides them with the
 # domestic mirrors when building from inside the corporate network.
 ARG GNU_MIRROR=https://ftp.gnu.org/gnu
 ARG PYTHON_MIRROR=https://www.python.org/ftp/python
+ARG PYPI_INDEX=https://pypi.org/simple
 
 # CPU baseline. The bundle must run on every aarch64/x86_64 host in the fleet,
 # including one added later with an older part, so the compiler is configured
@@ -108,7 +111,14 @@ WORKDIR /build
 # --retry alone already covers the transient timeouts and 5xx that matter.
 RUN curl -fsSL --retry 5 \
       "${GNU_MIRROR}/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" | tar xJ \
-    && (cd gcc-${GCC_VERSION} && ./contrib/download_prerequisites) \
+    && (cd gcc-${GCC_VERSION} \
+        && for package in gmp/gmp-6.2.1.tar.bz2 \
+                          mpfr/mpfr-4.1.0.tar.bz2 \
+                          mpc/mpc-1.2.1.tar.gz \
+                          gettext/gettext-0.22.tar.gz; do \
+             curl -fsSL --retry 5 "${GNU_MIRROR}/${package}" -o "${package##*/}"; \
+           done \
+        && ./contrib/download_prerequisites --no-isl) \
     && mkdir gcc-build && cd gcc-build \
     && ../gcc-${GCC_VERSION}/configure \
         --prefix="${PREFIX}/gcc" \
@@ -141,7 +151,8 @@ RUN curl -fsSL --retry 5 \
     && make -j"$(nproc)" \
     && make install \
     && cd /build && rm -rf Python-${PYTHON_VERSION} \
-    && "${PREFIX}/python/bin/python3.10" -m pip install --no-cache-dir --upgrade pip
+    && "${PREFIX}/python/bin/python3.10" -m pip install --no-cache-dir \
+        --index-url "${PYPI_INDEX}" 'pip==25.3'
 
 # --- ccache ---------------------------------------------------------------
 # >= 4.8 is a correctness requirement, not a preference: CCACHE_NAMESPACE is how
@@ -168,14 +179,25 @@ RUN curl -fsSL --retry 5 \
     && cd /build && rm -rf ccache-${CCACHE_VERSION} ccache-build
 
 # --- uv -------------------------------------------------------------------
-# Replaces conda's --system-site-packages layering: uv installs from a shared
-# cache by hardlink, so a per-job venv gets torch in seconds and costs no extra
-# disk, with none of the global mutable state that layering required.
-RUN arch="$(uname -m)" \
-    && curl -fsSL --retry 5 \
-        "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${arch}-unknown-linux-gnu.tar.gz" \
-      | tar xz --strip-components=1 -C "${PREFIX}/bin" \
+# Retained for fast project-local installs outside the preloaded simpler set.
+# The PyPI wheel is available for both architectures on the selected mirror.
+RUN "${PREFIX}/python/bin/python3.10" -m pip install --no-cache-dir \
+        --index-url "${PYPI_INDEX}" "uv==${UV_VERSION}" \
+    && install -m 0755 "${PREFIX}/python/bin/uv" "${PREFIX}/bin/uv" \
+    && install -m 0755 "${PREFIX}/python/bin/uvx" "${PREFIX}/bin/uvx" \
     && "${PREFIX}/bin/uv" --version
+
+# The simpler environment is a component of the same versioned bundle. Keep
+# this after the expensive GCC/Python layers so changing Python or Node pins
+# does not force a compiler bootstrap.
+RUN dnf install -y --setopt=tsflags=nodocs --setopt=install_weak_deps=False graphviz \
+    && dnf clean all
+COPY scripts/simpler-requirements.txt /usr/local/share/simpler-requirements.txt
+COPY scripts/simpler-node/ /usr/local/share/simpler-node/
+COPY scripts/install-simpler-env.sh /usr/local/bin/install-simpler-env.sh
+RUN PREFIX="${PREFIX}" NODE_VERSION="${NODE_VERSION}" GTEST_VERSION="${GTEST_VERSION}" \
+    PYPI_INDEX="${PYPI_INDEX}" \
+    bash /usr/local/bin/install-simpler-env.sh
 
 # --- activate.sh + MANIFEST -----------------------------------------------
 # Both generators live in scripts/ rather than inline: a multi-line shell

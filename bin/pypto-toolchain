@@ -438,6 +438,11 @@ check_require() {
         gcc)    have="$(bundle_field "$prefix" GCC_VERSION)" ;;
         ccache) have="$(bundle_field "$prefix" CCACHE_VERSION)" ;;
         uv)     have="$(bundle_field "$prefix" UV_VERSION)" ;;
+        cmake)  have="$(bundle_field "$prefix" CMAKE_VERSION)" ;;
+        ninja)  have="$(bundle_field "$prefix" NINJA_VERSION)" ;;
+        clang-tidy) have="$(bundle_field "$prefix" CLANG_TIDY_VERSION)" ;;
+        node)   have="$(bundle_field "$prefix" NODE_VERSION)" ;;
+        torch)  have="$(bundle_field "$prefix" TORCH_VERSION)" ;;
         *) bad "require $spec" "unknown component '$comp'"; return ;;
     esac
     [ -n "$have" ] || { bad "require $spec" "MANIFEST has no version for $comp"; return; }
@@ -564,6 +569,54 @@ cmd_verify() {
 
     if out="$(run_in_env "$prefix/bin/uv" --version 2>&1)"; then ok "uv ($out)"; else bad "uv" "$out"; fi
 
+    # Older releases have no simpler environment. New releases advertise
+    # TORCH_VERSION and verify the shared CPU/NPU host dependencies.
+    if [ -n "$(bundle_field "$prefix" TORCH_VERSION)" ]; then
+        if [ -f "$prefix/python/include/python3.10/Python.h" ] \
+           && [ -e "$prefix/gcc/lib64/libatomic.so.1" ]; then
+            ok "Python headers and libatomic"
+        else
+            bad "Python headers and libatomic" "missing Python.h or libatomic.so.1"
+        fi
+        if out="$(run_in_env "$prefix/python/bin/python3.10" -c \
+            'import torch,pytest,nanobind,scikit_build_core,numpy,safetensors; assert torch.version.cuda is None; print(torch.__version__)' 2>&1)"; then
+            ok "simpler Python and CPU torch ($out)"
+        else
+            bad "simpler Python and CPU torch" "$out"
+        fi
+        if out="$(run_in_env "$prefix/python/bin/python3.10" -m pip check 2>&1)"; then
+            ok "Python package consistency"
+        else
+            bad "Python package consistency" "$out"
+        fi
+        local tool
+        for tool in cmake ninja clang-tidy node markdownlint-cli2; do
+            case "$tool" in
+                node) out="$(run_in_env "$prefix/node/bin/node" --version 2>&1)" ;;
+                markdownlint-cli2) out="$(run_in_env "$prefix/bin/markdownlint-cli2" --version 2>&1)" ;;
+                *) out="$(run_in_env "$prefix/python/bin/$tool" --version 2>&1)" ;;
+            esac
+            if [ $? -eq 0 ]; then ok "$tool ($out)"; else bad "$tool" "$out"; fi
+        done
+        if out="$(printf 'digraph { a -> b }\n' | run_in_env "$prefix/bin/dot" -Tsvg 2>&1)" \
+           && [[ "$out" == *'<svg'* ]]; then
+            ok "Graphviz renders SVG"
+        else
+            bad "Graphviz renders SVG" "$out"
+        fi
+        if [ -f "$prefix/lib/libgtest.a" ] \
+           && [ -f "$prefix/lib/cmake/GTest/GTestConfig.cmake" ]; then
+            ok "GoogleTest headers and CMake package"
+        else
+            bad "GoogleTest headers and CMake package" "missing libgtest.a or GTestConfig.cmake"
+        fi
+        if find "$prefix/wheelhouse" -maxdepth 1 -name 'torch*cpu*.whl' -print -quit | grep -q .; then
+            ok "offline CPU torch wheel"
+        else
+            bad "offline CPU torch wheel" "wheelhouse has no CPU torch wheel"
+        fi
+    fi
+
     # ptoas lives outside the bundle (pinned per project, fetched per job), so
     # this is opportunistic: if the host happens to have one, prove the bundle's
     # libstdc++ actually satisfies it. env -i on purpose — an inherited
@@ -603,7 +656,7 @@ cmd_verify() {
     echo
     if [ "$FAILURES" -eq 0 ]; then
         printf '%s✅ pypto-toolchain %s ready%s\n' "$GREEN" "$version" "$RESET"
-        printf '   source %s/activate.sh\n' "$TOOLCHAIN_ROOT/current"
+        printf '   source %s/activate.sh\n' "$prefix"
         return 0
     fi
     printf '%s❌ %d check(s) failed%s\n' "$RED" "$FAILURES" "$RESET"

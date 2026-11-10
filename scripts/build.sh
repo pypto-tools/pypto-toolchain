@@ -11,7 +11,7 @@
 # Build one bundle and export it as a tarball plus its sha256.
 #
 #   scripts/build.sh 2026.08.1                  # build for the host arch
-#   scripts/build.sh 2026.08.1 --mirror cn      # domestic mirrors for GCC/Python
+#   scripts/build.sh 2026.08.1 --mirror cn      # domestic mirrors for GCC/Python/PyPI
 #   scripts/build.sh 2026.08.1 --mirror cn --proxy socks5://127.0.0.1:1080
 #                                               # ...and a proxy for the rest
 #
@@ -97,19 +97,24 @@ esac
 
 case "$MIRROR_SET" in
     upstream) GNU_MIRROR="https://ftp.gnu.org/gnu"
-              PYTHON_MIRROR="https://www.python.org/ftp/python" ;;
+              PYTHON_MIRROR="https://www.python.org/ftp/python"
+              PYPI_INDEX="https://pypi.org/simple" ;;
     cn)       GNU_MIRROR="https://mirrors.huaweicloud.com/gnu"
-              PYTHON_MIRROR="https://mirrors.huaweicloud.com/python" ;;
+              PYTHON_MIRROR="https://mirrors.huaweicloud.com/python"
+              PYPI_INDEX="https://mirrors.huaweicloud.com/repository/pypi/simple" ;;
     *) echo "unknown mirror set: $MIRROR_SET (expected: upstream, cn)" >&2; exit 2 ;;
 esac
+
+# Some builders can reach the GNU/Python domestic mirrors but not the selected
+# PyPI mirror. Keep the source mirror choice and Python index independent.
+PYPI_INDEX="${PYPTO_PYPI_INDEX:-$PYPI_INDEX}"
 
 # Proxy for downloads made INSIDE the build container. Separate from the proxy
 # dockerd needs to pull the base image: that one is a systemd drop-in on the
 # daemon and nothing here can influence it.
 #
-# --mirror cn covers GCC and Python, but contrib/download_prerequisites
-# (gcc.gnu.org) plus the ccache and uv release tarballs (github.com) still leave
-# the network, and those are exactly the hosts that are slow here.
+# --mirror cn covers GCC, Python, and PyPI. The ccache source release still
+# comes from GitHub and can be slow behind a restricted network.
 #
 # HTTP_PROXY/HTTPS_PROXY/NO_PROXY are predefined build args: docker forwards
 # them without an ARG declaration and keeps them out of the image history.
@@ -215,6 +220,7 @@ echo "    cache   ${PYPTO_BUILD_CACHE:-none}"
     --build-arg "GCC_ARCH_CONFIG=$GCC_ARCH_CONFIG" \
     --build-arg "GNU_MIRROR=$GNU_MIRROR" \
     --build-arg "PYTHON_MIRROR=$PYTHON_MIRROR" \
+    --build-arg "PYPI_INDEX=$PYPI_INDEX" \
     -t "$IMAGE" \
     .
 
@@ -227,10 +233,25 @@ echo "    cache   ${PYPTO_BUILD_CACHE:-none}"
 echo "==> smoke-testing the image"
 "${DOCKER[@]}" run --rm "$IMAGE" bash -c "set -eux
   '$PREFIX/python/bin/python3.10' -c 'import ssl,ctypes,sqlite3,lzma,venv,ensurepip'
+  test -f '$PREFIX/python/include/python3.10/Python.h'
   echo 'int main(){}' | '$PREFIX/gcc/bin/g++-15' -std=c++23 -x c++ - -o /tmp/probe
+  test -e '$PREFIX/gcc/lib64/libatomic.so.1'
   '$PREFIX/bin/ccache' --version
   CCACHE_NAMESPACE=probe '$PREFIX/bin/ccache' -p | grep -qi namespace
   '$PREFIX/bin/uv' --version"
+
+"${DOCKER[@]}" run --rm "$IMAGE" bash -c "set -eux
+  . '$PREFIX/activate.sh'
+  python3.10 -c 'import torch, pytest, nanobind, scikit_build_core, numpy, safetensors; assert torch.version.cuda is None'
+  cmake --version
+  ninja --version
+  clang-tidy --version
+  printf '#include <stddef.h>\\nint main() { return 0; }\\n' > /tmp/clang-resource-probe.cpp
+  clang-tidy /tmp/clang-resource-probe.cpp -- -std=c++17
+  node --version
+  markdownlint-cli2 --version
+  echo 'digraph { a -> b }' | dot -Tsvg | grep -q '<svg'
+  test -f '$PREFIX/lib/libgtest.a'"
 
 echo "==> exporting $TARBALL"
 mkdir -p "$OUT_DIR"
@@ -273,6 +294,13 @@ set_key GCC_VERSION       "$(read_manifest GCC_VERSION)"
 set_key PYTHON_VERSION    "$(read_manifest PYTHON_VERSION)"
 set_key CCACHE_VERSION    "$(read_manifest CCACHE_VERSION)"
 set_key UV_VERSION        "$(read_manifest UV_VERSION)"
+set_key CMAKE_VERSION     "$(read_manifest CMAKE_VERSION)"
+set_key NINJA_VERSION     "$(read_manifest NINJA_VERSION)"
+set_key CLANG_TIDY_VERSION "$(read_manifest CLANG_TIDY_VERSION)"
+set_key NODE_VERSION      "$(read_manifest NODE_VERSION)"
+set_key TORCH_VERSION     "$(read_manifest TORCH_VERSION)"
+set_key GRAPHVIZ_VERSION  "$(read_manifest GRAPHVIZ_VERSION)"
+set_key GTEST_VERSION     "$(read_manifest GTEST_VERSION)"
 set_key "BUNDLE_SHA256_${ARCH_UPPER}" "$SHA256"
 # Lets `install` show a percentage while downloading. Optional by design: a
 # manifest without it just reports MiB received, so older versions keep working.

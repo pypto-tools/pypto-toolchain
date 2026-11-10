@@ -136,7 +136,7 @@ jobs:
           # different component versions, "one bundle version = one environment"
           # is already false and no amount of downstream checking recovers it.
           status=0
-          for key in TOOLCHAIN_VERSION GLIBC_FLOOR GCC_VERSION PYTHON_VERSION CCACHE_VERSION UV_VERSION; do
+          for key in TOOLCHAIN_VERSION GLIBC_FLOOR GCC_VERSION PYTHON_VERSION CCACHE_VERSION UV_VERSION CMAKE_VERSION NINJA_VERSION CLANG_TIDY_VERSION NODE_VERSION TORCH_VERSION GRAPHVIZ_VERSION GTEST_VERSION; do
             av="$(grep -E "^$key=" "$a" | cut -d= -f2-)"
             xv="$(grep -E "^$key=" "$x" | cut -d= -f2-)"
             if [ "$av" != "$xv" ]; then
@@ -173,7 +173,8 @@ jobs:
           gh release create "$VERSION" \
             --title "pypto-toolchain $VERSION" \
             --notes-file - <<EOF
-          Host toolchain bundle: CPython, GCC + libstdc++, uv and ccache, built
+          Host environment bundle: CPython, GCC + libstdc++, uv, ccache, simpler
+          build/test dependencies, CPU torch, Node 20 and markdownlint, built
           against glibc $(grep -E '^GLIBC_FLOOR=' "manifest/$VERSION.env" | cut -d= -f2) so it runs on any host at or above that floor.
 
           \`\`\`

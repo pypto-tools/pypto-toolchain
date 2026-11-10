@@ -153,7 +153,7 @@ sudo dnf install -y binutils glibc-devel git tar findutils diffutils
 curl -fsSL https://raw.githubusercontent.com/pypto-tools/pypto-toolchain/main/install.sh \
   | sudo env https_proxy=http://127.0.0.1:7892 bash -s -- --storage /data/pypto
 
-# 3. survey the host before committing to a 200 MB download
+# 3. survey the host before downloading the bundle
 pypto-toolchain doctor
 
 # 4. download, verify, unpack
@@ -177,6 +177,29 @@ Then:
 source /opt/pypto/toolchain/2026.08.5/activate.sh
 ```
 
+Starting with `2026.11.1`, CPU and NPU jobs use the same bundle and activation
+command:
+
+```bash
+source /opt/pypto/toolchain/2026.11.1/activate.sh
+```
+
+It includes Python 3.10, GCC 15, CMake, Ninja, clang-tidy, Graphviz,
+GoogleTest, Node 20, markdownlint, CPU torch, and simpler's build/test
+dependencies. The NPU host still provides CANN and its driver; activation loads
+the host CANN environment when present. For a simpler checkout, create its
+local venv and install its Python dependencies without a package index:
+
+```bash
+python3.10 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install --no-index --find-links "$PYPTO_WHEELHOUSE" \
+  --no-build-isolation '.[test]'
+```
+
+Build targets that embed PTO-ISA headers still need the matching source checkout
+at simpler's `build/pto-isa`; simpler fetches it separately when absent.
+
 ## Where the bundle lives
 
 `/opt/pypto/toolchain/<version>` is compiled into the binaries, so the *path
@@ -199,7 +222,7 @@ Two places not to put it:
 - **A home directory or a CI workspace.** The CLI was moved out of
   `/home/pypto-tools` for this reason, and `install.sh` still warns about that
   old layout. Workspace cleanup, per-user quotas and home-directory backup tools
-  all treat 200 MB × N versions as something to reclaim or copy.
+  all treat the published bundle size × N versions as something to reclaim or copy.
 - **NFS.** `root_squash` stops the root-owned unpack, and running a compiler off
   NFS is slow enough to notice. Check with `df -T <path>` before choosing.
 

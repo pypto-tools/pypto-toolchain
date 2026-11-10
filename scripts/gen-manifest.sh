@@ -53,16 +53,23 @@ referenced_glibc_max() {
         | sed 's/^GLIBC_//' | sort -V | tail -1 || true
 }
 
-# sha256 of the load-bearing binaries. Not every file: the point is to catch a
-# truncated or partially-overwritten install, and these five are the ones whose
-# corruption would otherwise surface as a baffling mid-build error.
+# sha256 of load-bearing binaries and package locks. Not every file: the point
+# is to catch a truncated or partially-overwritten install before a job runs.
 checksums() {
     local f
     for f in "$PREFIX/gcc/bin/g++-15" \
              "$PREFIX/gcc/lib64/libstdc++.so.6" \
              "$PREFIX/python/bin/python3.10" \
              "$PREFIX/bin/ccache" \
-             "$PREFIX/bin/uv"; do
+             "$PREFIX/bin/uv" \
+             "$PREFIX/python/bin/cmake" \
+             "$PREFIX/python/bin/ninja" \
+             "$PREFIX/python/bin/clang-tidy" \
+             "$PREFIX/node/bin/node" \
+             "$PREFIX/bin/dot" \
+             "$PREFIX/lib/libgtest.a" \
+             "$PREFIX/node-markdownlint/package-lock.json" \
+             "$PREFIX/PYTHON-PACKAGES"; do
         if [ -e "$f" ]; then
             printf 'FILE_SHA256 %s %s\n' "${f#"$PREFIX"/}" "$(sha256sum "$f" | cut -d' ' -f1)"
         else
@@ -113,5 +120,12 @@ GLIBCXX_MAX $(glibcxx_max)
 PYTHON_VERSION $("$PREFIX/python/bin/python3.10" -c 'import platform;print(platform.python_version())')
 CCACHE_VERSION $("$PREFIX/bin/ccache" --version | sed -n '1s/[^0-9]*\([0-9][0-9.]*\).*/\1/p')
 UV_VERSION $("$PREFIX/bin/uv" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+CMAKE_VERSION $("$PREFIX/python/bin/cmake" --version | sed -n '1s/.*version //p')
+NINJA_VERSION $("$PREFIX/python/bin/ninja" --version)
+CLANG_TIDY_VERSION $("$PREFIX/python/bin/python3.10" -c 'from importlib.metadata import version;print(version("clang-tidy"))')
+NODE_VERSION $("$PREFIX/node/bin/node" --version | sed 's/^v//')
+TORCH_VERSION $("$PREFIX/python/bin/python3.10" -c 'import torch;print(torch.__version__)')
+GRAPHVIZ_VERSION $("$PREFIX/bin/dot" -V 2>&1 | sed -n 's/.*graphviz version \([^ ]*\).*/\1/p')
+GTEST_VERSION $(sed -n 's/^set(PACKAGE_VERSION "\([^"]*\)")/\1/p' "$PREFIX/lib/cmake/GTest/GTestConfigVersion.cmake" | sed -n '1p')
 $(checksums)
 EOF
