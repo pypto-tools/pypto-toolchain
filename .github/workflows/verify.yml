@@ -78,9 +78,17 @@ jobs:
           set -euo pipefail
           version="${{ github.event.release.tag_name || inputs.version }}"
           if [ -z "$version" ]; then
-            # A push to main verifies against the newest committed manifest,
-            # which is the version the fleet is expected to be running.
-            version="$(ls manifest/*.env | sed 's|manifest/||;s|\.env$||' | sort -V | tail -1)"
+            # A manifest can land before its release assets. On a main push,
+            # verify the newest version published for BOTH architectures.
+            # Otherwise an unreleased manifest makes this job fail at download.
+            for candidate in $(ls manifest/*.env | sed 's|manifest/||;s|\.env$||' | sort -rV); do
+              base="https://github.com/pypto-tools/pypto-toolchain/releases/download/$candidate"
+              if curl -fsSIL --max-time 20 "$base/pypto-toolchain-$candidate-aarch64.tar.gz" >/dev/null 2>&1 &&
+                 curl -fsSIL --max-time 20 "$base/pypto-toolchain-$candidate-x86_64.tar.gz" >/dev/null 2>&1; then
+                version="$candidate"
+                break
+              fi
+            done
           fi
           [ -n "$version" ] || { echo "::error::no version to verify"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
