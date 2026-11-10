@@ -584,7 +584,9 @@ cmd_verify() {
         else
             bad "simpler Python and CPU torch" "$out"
         fi
-        if out="$(run_in_env "$prefix/python/bin/python3.10" -m pip check 2>&1)"; then
+        # CANN's set_env.sh may add host packages to PYTHONPATH. Verify only
+        # the bundle's own packages, not that host environment's dependencies.
+        if out="$(run_in_env "$prefix/python/bin/python3.10" -I -m pip check 2>&1)"; then
             ok "Python package consistency"
         else
             bad "Python package consistency" "$out"
